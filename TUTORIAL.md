@@ -1,19 +1,10 @@
-# Adroid — Joint Testing Tutorial
+# Adroid — Joint Testing Tutorial (v2)
 
 > Step-by-step guide for testing Adroid together: founder (you, on laptop + phone) + AI agent (me, remote).
 
-This tutorial walks through the **full end-to-end flow** we'll use to test together:
+This tutorial uses the **unified `adroid` CLI** — one command, multiple subcommands (gaya `git`/`docker`/`kubectl`).
 
-1. You set up the runtime on your laptop
-2. You pair your Android phone (wireless or USB)
-3. You expose the runtime to the internet
-4. I (the AI) request pairing via the API
-5. You approve in your browser
-6. I get full access to your phone
-7. We test all 5 tools live
-8. You disconnect when done
-
-**Time needed:** 20–40 minutes (depending on whether you've used ADB before)
+**Time needed:** 20–40 minutes
 
 ---
 
@@ -24,7 +15,7 @@ This tutorial walks through the **full end-to-end flow** we'll use to test toget
 - **Python 3.10+** — check with `python3 --version`
 - **git** — check with `git --version`
 - **adb** (Android Debug Bridge) — install:
-  - Debian/Ubuntu: `sudo apt install android-tools-adb`
+  - Debian/Ubuntu: `sudo apt install adb`
   - macOS: `brew install android-tools`
   - Windows: download [platform-tools](https://developer.android.com/tools/releases/platform-tools) and add to PATH
 - **cloudflared** OR **ngrok** — for exposing the runtime to the internet so I can reach it
@@ -41,26 +32,60 @@ This tutorial walks through the **full end-to-end flow** we'll use to test toget
 
 ---
 
-## Step 1 — Install Adroid on your laptop
+## Step 0 — Install Adroid
 
 ```bash
 git clone https://github.com/albytehq/adroid.git
 cd adroid
+
+# Linux (Ubuntu/Debian) — needs venv because of PEP 668
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -e ".[web,dev,mcp]"
+
+# macOS / Windows (no PEP 668)
 pip install -e ".[web,dev,mcp]"
 ```
 
-Verify the install worked:
+Every time you open a new terminal, re-activate the venv:
 
 ```bash
-pytest --version    # should print pytest version
-adroid-pair --help  # should print help text
+cd ~/adroid
+source .venv/bin/activate
 ```
 
-If `adroid-pair` is not found, your pip bin directory may not be in PATH. Try:
+You'll know it's active when the prompt shows `(.venv)` at the start.
+
+---
+
+## Step 1 — Run the doctor
 
 ```bash
-python -m adroid.pair --help
+adroid doctor
 ```
+
+This checks your environment — Python version, adb binary, optional extras, network reachability. You should see all green ✓:
+
+```
+╭─ Adroid Doctor ─────────────────────────────────────╮
+│ Running environment diagnostics…                    │
+╰─────────────────────────────────────────────────────╯
+
+✓ Python 3.12.13 ✓
+✓ adb binary: /usr/bin/adb
+✓ extras [web]: installed
+✓ extras [mcp]: installed
+✓ Network: can reach internet (good for cloudflared/ngrok)
+
+╭─ Diagnostics complete ──────────────────────────────╮
+│ If everything above is green, you're ready to:      │
+│   adroid pair list   — see connected devices        │
+│   adroid start       — boot the runtime             │
+╰─────────────────────────────────────────────────────╯
+```
+
+If anything is red/yellow, fix it before continuing.
 
 ---
 
@@ -68,7 +93,7 @@ python -m adroid.pair --help
 
 Pick ONE of three options. **Option A is recommended** (no USB cable needed, survives reboots).
 
-### Option A: Android 11+ wireless debugging (recommended, no USB)
+### Option A: Android 11+ wireless debugging (no USB cable)
 
 1. On your phone: **Settings → System → Developer options → Wireless debugging** → toggle ON
 2. Tap **"Pair device with pairing code"**
@@ -79,12 +104,12 @@ Pick ONE of three options. **Option A is recommended** (no USB cable needed, sur
    ```
 4. On your laptop:
    ```bash
-   adroid-pair --pair 192.168.1.42:4321 --code 123456
+   adroid pair wireless --ip 192.168.1.42 --port 4321 --code 123456
    ```
 5. After successful pairing, **go back to the main Wireless debugging screen** (not the pairing screen) and look at the IP & port shown at the top — that's the *connect* port (different from the pairing port). Example: `192.168.1.42:5555`
 6. Connect:
    ```bash
-   adroid-pair --connect 192.168.1.42:5555
+   adroid pair connect --ip 192.168.1.42 --port 5555
    ```
 7. Tap **Allow** on the phone's debugging prompt (one-time)
 
@@ -93,18 +118,17 @@ Pick ONE of three options. **Option A is recommended** (no USB cable needed, sur
 1. Plug in the USB cable
 2. On your laptop:
    ```bash
-   adroid-pair --list    # should show your device
-   adroid-pair           # auto-verify the first device
+   adroid pair usb
    ```
 3. Tap **Allow** on the phone's "Allow USB debugging?" prompt
 4. Check "Always allow from this computer" to skip future prompts
 
-### Option C: WiFi ADB via tcpip (Android < 11, or wireless debugging unavailable)
+### Option C: WiFi ADB via tcpip (Android < 11)
 
 1. Plug in USB cable
 2. Run on laptop:
    ```bash
-   adroid-pair --wireless-setup 192.168.1.42
+   adroid pair tcpip --ip 192.168.1.42
    ```
 3. Follow the prompts:
    - Press Enter after plugging USB
@@ -116,61 +140,80 @@ Pick ONE of three options. **Option A is recommended** (no USB cable needed, sur
 ### Verify (any option)
 
 ```bash
-adroid-pair --verify
+adroid pair verify
 ```
 
 You should see:
-```
-[ok] device model: Pixel 8 Pro
-[ok] Android version: 14
-[ok] testing screencap...
-[ok] screencap works (1234567 bytes)
 
-============================================================
-Device ready for Adroid!
-============================================================
+```
+╭─ Device Verification ───────────────────────────────╮
+│ Target: auto-pick first ready device                │
+╰─────────────────────────────────────────────────────╯
+
+✓ Android Debug Bridge version 1.0.41
+✓ Auto-picked: 192.168.1.42:5555 (Pixel 8, wireless)
+✓ Device model: Pixel 8
+✓ Android version: 14
+✓ SDK level: 34
+ℹ Testing screencap...
+✓ screencap works (1,234,567 bytes)
+
+╭─ Device ready for Adroid! ──────────────────────────╮
+│ Start the runtime with:                             │
+│   adroid start --bridge adb                         │
+│                                                     │
+│ Device ID for agent calls:                          │
+│   {"kind": "adb", "value": "192.168.1.42:5555"}    │
+│                                                     │
+│ Wireless connection active. Phone can be anywhere   │
+│ on this WiFi.                                       │
+╰─────────────────────────────────────────────────────╯
 ```
 
 If verification fails, see [Troubleshooting](#troubleshooting) below.
 
 ---
 
-## Step 3 — Start the Adroid runtime
+## Step 3 — Start the runtime
 
 ```bash
-adroid-start --bridge adb --port 7654
+adroid start --bridge adb --port 7654
 ```
 
-You'll see output like:
+You'll see a beautiful banner:
 
 ```
-======================================================================
-Adroid runtime ready.
+╭─ Adroid Runtime Ready ──────────────────────────────╮
+│ Web UI          http://localhost:7654/ui            │
+│ Agent API       http://localhost:7654/agent/call    │
+│ Pairing API     http://localhost:7654/agent/session/request │
+│ WebSocket       ws://localhost:7654/ws              │
+│ Audit log       adroid.auditlog                     │
+│ Bridge          adb                                 │
+│ Issuer ID       adroid-abc12345                     │
+│ Browser session browser-def67890                   │
+│ Max sessions    20                                  │
+╰─────────────────────────────────────────────────────╯
 
-  Web UI:          http://localhost:7654/ui
-  Agent API:       http://localhost:7654/agent/call
-  Pairing API:     http://localhost:7654/agent/session/request
-  WebSocket:       ws://localhost:7654/ws
-  Audit log:       ./adroid.auditlog
-  Bridge:          adb
-  Issuer ID:       adroid-abc12345
-  Browser session: browser-def67890
-  Max sessions:    20
+╭─ Bootstrap token ───────────────────────────────────╮
+│ {"token_id":"...","issuer":"adroid-abc12345",       │
+│  "subject":"bootstrap","grants":[],                 │
+│  "signature":"..."}                                 │
+╰─────────────────────────────────────────────────────╯
 
-Bootstrap token (give this to your AI agent):
-
-{"token_id":"...","issuer":"adroid-abc12345","subject":"bootstrap","issued_at":"...","expires_at":"...","grants":[],"signature":"..."}
-
-Agent flow:
-  1. AI POSTs bootstrap_token + agent_id to /agent/session/request
-  2. AI gets back pairing_url → shares it with you in chat
-  3. You open the URL → pick TTL → Approve
-  4. AI polls /agent/session/{pairing_id} → gets session_token
-  5. AI calls /agent/call freely with session_token
-  6. Click Disconnect in browser to revoke
-
-To expose to the internet: cloudflared tunnel --url http://localhost:7654
-======================================================================
+╭─ Agent flow ────────────────────────────────────────╮
+│ 1. AI POSTs bootstrap_token + agent_id to           │
+│    /agent/session/request                           │
+│ 2. AI gets back pairing_url → shares it with you    │
+│ 3. You open the URL → pick TTL → Approve            │
+│ 4. AI polls /agent/session/{pairing_id} → gets      │
+│    session_token                                    │
+│ 5. AI calls /agent/call freely with session_token   │
+│ 6. Click Disconnect in browser to revoke            │
+│                                                     │
+│ To expose to the internet:                          │
+│   cloudflared tunnel --url http://localhost:7654    │
+╰─────────────────────────────────────────────────────╯
 ```
 
 **Copy the entire bootstrap token JSON** (the line starting with `{"token_id"`). You'll give it to me.
@@ -383,27 +426,91 @@ I'll tell you in chat: "Disconnected. Aku gak bisa akses HP lo lagi."
 
 ---
 
-## Step 12 — Cleanup
+## Step 12 — Inspect the audit log
+
+After we're done testing, check the audit log to see every call I made:
+
+```bash
+adroid audit show --limit 50
+```
+
+Output:
+```
+╭─ Audit Log — Last 50 Events ────────────────────────╮
+│ File: adroid.auditlog                               │
+╰─────────────────────────────────────────────────────╯
+
+#   Time              Outcome   Method                    Capability        Subject
+0   2026-08-02 13:35  success   runtime.boot              —                 —
+1   2026-08-02 13:36  success   runtime.device_list       device.list       session:super-z
+2   2026-08-02 13:36  success   runtime.device_observe    device.observe    session:super-z
+3   2026-08-02 13:36  success   runtime.device_screenshot device.screenshot session:super-z
+4   2026-08-02 13:37  success   runtime.app_list          app.list          session:super-z
+5   2026-08-02 13:37  success   runtime.app_launch        app.launch        session:super-z
+```
+
+Verify the hash chain + signatures are intact:
+
+```bash
+adroid audit verify
+```
+
+Output:
+```
+╭─ Audit Log Verification ────────────────────────────╮
+│ File: adroid.auditlog                               │
+╰─────────────────────────────────────────────────────╯
+
+✓ All 6 events verified successfully.
+```
+
+---
+
+## Step 13 — Cleanup
 
 When we're completely done:
 
 1. Press `Ctrl+C` in the **cloudflared/ngrok terminal** to stop the tunnel
-2. Press `Ctrl+C` in the **adroid-start terminal** to stop the runtime
+2. Press `Ctrl+C` in the **adroid start terminal** to stop the runtime
 3. (Optional) On your phone: turn off USB debugging or wireless debugging if you don't need it
-4. (Optional) Inspect the audit log to see everything that happened:
-   ```bash
-   cat adroid.auditlog | python -m json.tool
-   ```
 
-The audit log is signed and hash-chained — you can verify no entries were tampered with by running:
+---
+
+## CLI command reference
+
 ```bash
-python -c "
-from pathlib import Path
-from adroid.audit import AuditReader
-from adroid.permissions.tokens import load_public_key
-# You'd need to save the audit public key separately — for now just inspect the JSON
-"
+# Diagnostics
+adroid doctor                    # check environment + deps
+adroid version                   # show version + environment info
+
+# Device pairing
+adroid pair list                 # list connected devices
+adroid pair verify               # auto-pick + verify first device
+adroid pair verify --serial X    # verify specific device
+adroid pair usb                  # interactive USB pairing
+adroid pair wireless --ip IP --port PORT --code CODE   # Android 11+
+adroid pair connect --ip IP --port PORT                # connect to paired device
+adroid pair tcpip --ip IP        # Android < 11 USB→wireless transition
+
+# Runtime
+adroid start --bridge adb        # boot runtime with ADB bridge
+adroid start --bridge mock       # boot runtime with mock device (no phone)
+adroid start --bridge adb --port 8080  # custom port
+
+# Tokens (advanced — usually not needed, runtime handles pairing automatically)
+adroid token issue --subject X --grant cap:scope [--ttl 3600]
+adroid token inspect <token_json>
+
+# Audit log
+adroid audit show --limit 50     # show recent events
+adroid audit show --json         # output as JSON
+adroid audit verify              # verify hash chain + signatures
+
+# MCP server (optional, for MCP-compatible AI clients)
+adroid mcp serve --audit-log /tmp/adroid.auditlog --mock
 ```
+
+Run `adroid <command> --help` for detailed options on any command.
 
 ---
 
@@ -411,10 +518,10 @@ from adroid.permissions.tokens import load_public_key
 
 ### "adb: command not found"
 
-Install adb:
-- Debian/Ubuntu: `sudo apt install android-tools-adb`
-- macOS: `brew install android-tools`
-- Windows: download platform-tools from developer.android.com
+```bash
+sudo apt install adb          # Linux
+brew install android-tools    # macOS
+```
 
 ### "no devices/emulators found" or empty device list
 
@@ -436,32 +543,32 @@ The phone is showing an "Allow USB debugging?" dialog. Unlock the phone, tap **A
 
 ### Pairing code expired (Android 11+ wireless)
 
-The 6-digit pairing code is only valid for ~30 seconds. Generate a new one and run `adroid-pair --pair` immediately.
+The 6-digit pairing code is only valid for ~30 seconds. Generate a new one and run `adroid pair wireless` immediately.
 
 ### Wrong port used for connect vs pair
 
 Android 11+ wireless debugging has TWO ports:
-- **Pairing port** (under "Pair device with pairing code") — used with `--pair`
-- **Connect port** (top of main wireless debugging screen) — used with `--connect`
+- **Pairing port** (under "Pair device with pairing code") — used with `adroid pair wireless`
+- **Connect port** (top of main wireless debugging screen) — used with `adroid pair connect`
 
 They're different numbers. Don't mix them up.
 
-### `adroid-start` says "port 7654 already in use"
+### `adroid start` says "port 7654 already in use"
 
 Another process is using that port. Either kill it or use a different port:
 ```bash
-adroid-start --bridge adb --port 7655
+adroid start --bridge adb --port 7655
 ```
 
 ### cloudflared/ngrok URL doesn't reach the runtime
 
-- Make sure `adroid-start` is running (check the terminal — you should see "Application startup complete")
+- Make sure `adroid start` is running (check the terminal — you should see "Application startup complete")
 - Make sure you're tunneling to the right port (7654 by default)
 - Try the URL in your own browser first: `https://your-url.trycloudflare.com/api/tools` — should return JSON
 
 ### Bootstrap token rejected with 401
 
-You probably copied the token wrong. Re-copy the entire JSON line from the `adroid-start` output — it should start with `{"token_id"` and end with `}`. Make sure no characters got cut off.
+You probably copied the token wrong. Re-copy the entire JSON line from the `adroid start` output — it should start with `{"token_id"` and end with `}`. Make sure no characters got cut off.
 
 ### I (the AI) get "adroid.session.revoked" on a call
 
@@ -475,16 +582,33 @@ adb exec-out screencap -p > test.png
 ```
 If that fails, the device may need root, or you need to use a different bridge (Termux bridge can take screenshots without root via `termux-screenshot`).
 
+### `pip install` fails with "Connection broken: IncompleteRead"
+
+Your internet is unstable. Retry the install. If it keeps failing:
+- Try a different network (mobile hotspot)
+- Use a pip mirror: `pip install -e ".[web,dev,mcp]" -i https://pypi.tuna.tsinghua.edu.cn/simple`
+
+### "externally-managed-environment" error
+
+You're on Ubuntu 24.04+ which uses PEP 668. Use a venv:
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[web,dev,mcp]"
+```
+
+Remember to `source .venv/bin/activate` every time you open a new terminal.
+
 ---
 
 ## Testing checklist (for our joint session)
 
 Use this to track our progress:
 
-- [ ] You installed Adroid on your laptop
+- [ ] You ran `adroid doctor` — all green
 - [ ] You paired your phone (USB / wireless / tcpip)
-- [ ] You verified the device with `adroid-pair --verify`
-- [ ] You started the runtime with `adroid-start`
+- [ ] You verified the device with `adroid pair verify`
+- [ ] You started the runtime with `adroid start --bridge adb`
 - [ ] You exposed it with cloudflared/ngrok
 - [ ] You opened the dashboard at `http://localhost:7654/ui`
 - [ ] You gave me the URL + bootstrap token
@@ -498,6 +622,8 @@ Use this to track our progress:
 - [ ] I called `app.launch` — the app opened on your phone
 - [ ] I did 5 rapid calls — you saw them stream fast
 - [ ] You clicked Disconnect — I confirmed I got revoked
+- [ ] You ran `adroid audit show` — saw every call
+- [ ] You ran `adroid audit verify` — hash chain intact
 - [ ] You cleaned up (stopped runtime + tunnel)
 
 ---
@@ -520,15 +646,5 @@ This isn't just a demo — we're verifying the **core promises** of Adroid:
 If all the checklist items pass, we've proven the v0.1.0 MVP works end-to-end. Time to celebrate 🍻 and plan v0.2.0.
 
 ---
-
-## Next steps after this test
-
-Once we've verified v0.1.0 works:
-
-1. **Iterate** — anything that felt clunky? File issues at https://github.com/albytehq/adroid/issues
-2. **v0.2.0 planning** — persistent ADB connection, accessibility service bridge (for non-root input injection), OpenAPI freeze
-3. **Real-world use cases** — what would you actually use this for? Test those scenarios
-4. **Security review** — run the adversarial test suite (Plan D from earlier) to verify the security claims
-5. **Multi-device** — v0.1.0 limits to 1 HP per runtime; v0.2.0 will support multiple
 
 Let's ship this. 🔧📱

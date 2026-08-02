@@ -28,6 +28,8 @@ classifiers = [
 dependencies = [
     "pydantic>=2.5,<3",
     "cryptography>=42,<46",
+    "typer>=0.12,<1",
+    "rich>=13.7,<14",
 ]
 
 [project.optional-dependencies]
@@ -57,10 +59,13 @@ Documentation = "https://github.com/albytehq/adroid/tree/main/docs"
 Issues = "https://github.com/albytehq/adroid/issues"
 
 [project.scripts]
-adroid-start = "adroid.cli:main"
+adroid = "adroid.cli.main:app"
+
+# Legacy entry points kept for backwards compat (will be removed in v0.2.0)
+adroid-start = "adroid.cli.start:start_main"
+adroid-pair = "adroid.cli.pair:pair_main"
 adroid-issue-token = "adroid.mcp.issue_token:main"
 adroid-mcp-server = "adroid.mcp.server:main"
-adroid-pair = "adroid.pair:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
