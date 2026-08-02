@@ -1,0 +1,73 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "adroid"
+version = "0.1.0"
+description = "Self-hosted, contract-governed runtime that gives AI agents a stable, audit-grade surface to observe, request, and act on Android devices."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "albifahriza", email = "founder@adroid.dev" },
+]
+keywords = ["android", "ai", "agents", "mcp", "runtime", "audit", "automation"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Hardware :: Hardware Drivers",
+]
+dependencies = [
+    "pydantic>=2.5,<3",
+    "cryptography>=42,<46",
+]
+
+[project.optional-dependencies]
+mcp = [
+    "mcp>=1.0,<2",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.1",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+    "mypy>=1.10",
+]
+
+[project.urls]
+Homepage = "https://github.com/albyteECO/adroid"
+Repository = "https://github.com/albyteECO/adroid"
+Documentation = "https://github.com/albyteECO/adroid/tree/main/docs"
+Issues = "https://github.com/albyteECO/adroid/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["adroid*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra --strict-markers --tb=short"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
