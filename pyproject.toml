@@ -34,12 +34,20 @@ dependencies = [
 mcp = [
     "mcp>=1.0,<2",
 ]
+web = [
+    "fastapi>=0.110,<1",
+    "uvicorn[standard]>=0.27,<1",
+    "jinja2>=3.1,<4",
+    "python-multipart>=0.0.9,<1",
+]
+termux = []  # no extra deps; uses termux-api CLI via subprocess
 dev = [
     "pytest>=8.0",
     "pytest-cov>=4.1",
     "pytest-asyncio>=0.23",
     "ruff>=0.4",
     "mypy>=1.10",
+    "httpx>=0.27",  # for testing WebServer
 ]
 
 [project.urls]
@@ -48,9 +56,17 @@ Repository = "https://github.com/albytehq/adroid"
 Documentation = "https://github.com/albytehq/adroid/tree/main/docs"
 Issues = "https://github.com/albytehq/adroid/issues"
 
+[project.scripts]
+adroid-start = "adroid.cli:main"
+adroid-issue-token = "adroid.mcp.issue_token:main"
+adroid-mcp-server = "adroid.mcp.server:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["adroid*"]
+
+[tool.setuptools.package-data]
+"adroid.web" = ["templates/*.html", "static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

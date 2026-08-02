@@ -112,7 +112,7 @@ class DeviceId(_Frozen):
     ``value`` is the bridge-native serial (e.g. ADB serial, emulator port).
     """
 
-    kind: Literal["adb", "emulator", "remote"] = "adb"
+    kind: Literal["adb", "emulator", "remote", "termux"] = "adb"
     value: str = Field(min_length=1, max_length=128)
 
     def __str__(self) -> str:

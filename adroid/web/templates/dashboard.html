@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Adroid · Permission Dashboard</title>
+  <style>
+    :root {
+      --bg: #0a0e14;
+      --panel: #11161f;
+      --panel-2: #1a2030;
+      --border: #2a3245;
+      --text: #e6edf3;
+      --text-dim: #8b96a7;
+      --accent: #58a6ff;
+      --green: #3fb950;
+      --red: #f85149;
+      --yellow: #d29922;
+      --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 14px;
+      padding: 16px;
+      min-height: 100vh;
+    }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 16px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin-bottom: 16px;
+    }
+    .header h1 {
+      font-size: 16px;
+      font-weight: 600;
+    }
+    .header .meta {
+      color: var(--text-dim);
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      height: calc(100vh - 100px);
+    }
+    @media (max-width: 800px) {
+      .grid { grid-template-columns: 1fr; height: auto; }
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .panel-header {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: var(--panel-2);
+    }
+    .panel-header h2 {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .panel-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+    }
+    .pending-card {
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--yellow);
+      border-radius: 6px;
+      padding: 12px;
+      margin-bottom: 10px;
+    }
+    .pending-card.timeout { border-left-color: var(--red); }
+    .pending-card.approved { border-left-color: var(--green); }
+    .pending-card.denied { border-left-color: var(--red); }
+    .pending-card .row {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 4px;
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+    .pending-card .label { color: var(--text-dim); }
+    .pending-card .value { color: var(--text); }
+    .pending-card .tool {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--accent);
+      margin-bottom: 6px;
+    }
+    .pending-card .args {
+      background: var(--bg);
+      padding: 6px 8px;
+      border-radius: 4px;
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-dim);
+      margin: 6px 0;
+      word-break: break-all;
+    }
+    .pending-card .buttons {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .btn {
+      flex: 1;
+      padding: 8px 12px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--text);
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      transition: all 0.15s;
+    }
+    .btn:hover { background: var(--panel-2); }
+    .btn.approve {
+      background: var(--green);
+      color: #0a0e14;
+      border-color: var(--green);
+      font-weight: 600;
+    }
+    .btn.approve:hover { opacity: 0.9; }
+    .btn.deny {
+      background: transparent;
+      color: var(--red);
+      border-color: var(--red);
+    }
+    .btn.deny:hover { background: var(--red); color: var(--bg); }
+    .terminal {
+      background: var(--bg);
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .terminal-line {
+      padding: 2px 0;
+      display: flex;
+      gap: 8px;
+      border-bottom: 1px dotted rgba(255,255,255,0.04);
+    }
+    .terminal-line .ts { color: var(--text-dim); flex-shrink: 0; }
+    .terminal-line .kind {
+      width: 60px;
+      flex-shrink: 0;
+      font-weight: 600;
+    }
+    .terminal-line .kind.request { color: var(--accent); }
+    .terminal-line .kind.result { color: var(--green); }
+    .terminal-line .kind.error { color: var(--red); }
+    .terminal-line .kind.system { color: var(--text-dim); }
+    .terminal-line .text { flex: 1; word-break: break-all; }
+    .empty {
+      color: var(--text-dim);
+      text-align: center;
+      padding: 24px;
+      font-style: italic;
+    }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--green);
+      display: inline-block;
+      margin-right: 6px;
+    }
+    .status-dot.disconnected { background: var(--red); }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>🔒 Adroid Permission Dashboard</h1>
+    <div class="meta">
+      <span id="ws-status"><span class="status-dot"></span>connected</span>
+      · issuer=<code>{{ issuer_id }}</code>
+      · session=<code>{{ session_id }}</code>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <div class="panel-header">
+        <h2>Pending Approvals</h2>
+        <span id="pending-count" class="meta" style="color: var(--text-dim); font-family: var(--mono); font-size: 12px;">0</span>
+      </div>
+      <div class="panel-body" id="pending-list">
+        <div class="empty">No pending requests</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">
+        <h2>Agent Terminal</h2>
+        <span id="terminal-count" class="meta" style="color: var(--text-dim); font-family: var(--mono); font-size: 12px;">0 lines</span>
+      </div>
+      <div class="panel-body terminal" id="terminal">
+        <div class="empty">No activity yet</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const pendingList = document.getElementById('pending-list');
+    const terminal = document.getElementById('terminal');
+    const pendingCount = document.getElementById('pending-count');
+    const terminalCount = document.getElementById('terminal-count');
+    const wsStatus = document.getElementById('ws-status');
+    let lineCount = 0;
+
+    function fmtTs(iso) {
+      const d = new Date(iso);
+      return d.toLocaleTimeString('en-US', { hour12: false }) + '.' + String(d.getMilliseconds()).padStart(3, '0');
+    }
+
+    function renderPending(items) {
+      pendingCount.textContent = items.length;
+      if (items.length === 0) {
+        pendingList.innerHTML = '<div class="empty">No pending requests</div>';
+        return;
+      }
+      pendingList.innerHTML = items.map(p => `
+        <div class="pending-card" id="pending-${p.approval_id}">
+          <div class="tool">${p.capability} <span style="color: var(--text-dim); font-weight: 400; font-size: 12px;">[${p.required_scope}]</span></div>
+          <div class="row"><span class="label">subject</span><span class="value">${p.subject}</span></div>
+          <div class="row"><span class="label">method</span><span class="value">${p.method}</span></div>
+          ${p.device_id ? `<div class="row"><span class="label">device</span><span class="value">${p.device_id}</span></div>` : ''}
+          <div class="row"><span class="label">requested</span><span class="value">${fmtTs(p.requested_at)}</span></div>
+          <div class="args">args: ${JSON.stringify(p.args)}</div>
+          <div class="buttons">
+            <button class="btn approve" onclick="approve('${p.approval_id}')">Approve</button>
+            <button class="btn deny" onclick="deny('${p.approval_id}')">Deny</button>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    function appendTerminal(line) {
+      lineCount++;
+      terminalCount.textContent = lineCount + ' lines';
+      // Remove empty placeholder
+      const empty = terminal.querySelector('.empty');
+      if (empty) empty.remove();
+
+      const div = document.createElement('div');
+      div.className = 'terminal-line';
+      div.innerHTML = `
+        <span class="ts">${fmtTs(line.ts)}</span>
+        <span class="kind ${line.kind}">${line.kind}</span>
+        <span class="text">${escapeHtml(line.text)}</span>
+      `;
+      terminal.appendChild(div);
+      // Cap at 500 lines
+      while (terminal.children.length > 500) {
+        terminal.removeChild(terminal.firstChild);
+      }
+      // Auto-scroll
+      terminal.scrollTop = terminal.scrollHeight;
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      })[c]);
+    }
+
+    async function approve(id) {
+      const res = await fetch('/api/approve/' + id, { method: 'POST' });
+      if (res.ok) {
+        const card = document.getElementById('pending-' + id);
+        if (card) card.style.opacity = '0.5';
+      }
+    }
+
+    async function deny(id) {
+      const res = await fetch('/api/deny/' + id, { method: 'POST' });
+      if (res.ok) {
+        const card = document.getElementById('pending-' + id);
+        if (card) card.style.opacity = '0.5';
+      }
+    }
+
+    // WebSocket
+    function connect() {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const ws = new WebSocket(`${proto}://${location.host}/ws`);
+      ws.onopen = () => {
+        wsStatus.innerHTML = '<span class="status-dot"></span>connected';
+      };
+      ws.onclose = () => {
+        wsStatus.innerHTML = '<span class="status-dot disconnected"></span>disconnected';
+        setTimeout(connect, 1000);
+      };
+      ws.onmessage = (ev) => {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === 'history') {
+          (msg.lines || []).forEach(appendTerminal);
+          renderPending(msg.pending || []);
+        } else if (msg.type === 'terminal') {
+          appendTerminal(msg.line);
+        } else if (msg.type === 'pending') {
+          renderPending(msg.pending || []);
+        }
+      };
+    }
+    connect();
+
+    // Also poll /api/pending every 2s as backup
+    setInterval(async () => {
+      try {
+        const res = await fetch('/api/pending');
+        const items = await res.json();
+        renderPending(items);
+      } catch (e) {}
+    }, 2000);
+  </script>
+</body>
+</html>
