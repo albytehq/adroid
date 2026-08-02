@@ -77,9 +77,21 @@ def canonical_token_payload(token: CapabilityToken) -> bytes:
 
     Do NOT call this from outside the permissions module. The shape is a
     stable contract, but the function itself is not.
+
+    IMPORTANT: frozenset[CapabilityGrant] serializes as a JSON array, but
+    sets have non-deterministic iteration order in Python. We MUST sort
+    the grants array by a stable key (capability.value) before serializing,
+    otherwise the same token will produce different canonical bytes on
+    different runs — and signatures will not verify.
     """
     payload = token.model_dump(mode="json", exclude={"signature"}, exclude_none=False)
-    # Sort keys recursively + no whitespace + UTF-8 preserve non-ASCII.
+    # Sort grants deterministically by (capability, scope) so the canonical
+    # form is byte-stable regardless of frozenset iteration order.
+    if "grants" in payload and isinstance(payload["grants"], list):
+        payload["grants"] = sorted(
+            payload["grants"],
+            key=lambda g: (g.get("capability", ""), g.get("scope", "")),
+        )
     return json.dumps(
         payload,
         sort_keys=True,

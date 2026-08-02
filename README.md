@@ -2,21 +2,20 @@
 
 > Self-hosted, contract-governed runtime that gives AI agents a stable,
 > audit-grade surface to observe, request, and act on Android devices —
-> with **interactive web-based permission flow** so the device owner
-> approves every state-changing action.
+> with **one-time pairing** so the device owner approves the AI once,
+> then it has full access until they disconnect.
 
 **Status:** v0.1.0 MVP · **License:** Apache-2.0 · **Python:** ≥3.10
 
 Adroid is not a wrapper around ADB. It is a runtime that owns the contract
 and treats drivers as replaceable details. The public API survives swaps
-between ADB, Termux, UIAutomator, accessibility services, Termux helpers,
-and future drivers that do not exist yet.
+between ADB, Termux, UIAutomator, accessibility services, and future
+drivers that do not exist yet.
 
-The killer feature: **AI agents cannot do anything on your phone without
-your explicit per-action approval**. Every ACT-scope call (launch app,
-inject input, write file) blocks until you tap Approve in a browser
-dashboard. Every call — approved or denied — is recorded in a signed,
-hash-chained, append-only audit log.
+The deal: **AI pairs once → full access until TTL/disconnect**. No
+per-action approval friction. Every call is signed-audited and live-streamed
+to a browser dashboard so the human always sees what the AI is doing.
+Click Disconnect anytime to instantly revoke.
 
 ## What's in v0.1.0
 
@@ -24,12 +23,17 @@ hash-chained, append-only audit log.
 - ✅ Capability-scoped tokens (Ed25519-signed)
 - ✅ Permission gate with per-tool rate limiting
 - ✅ Append-only, hash-chained, Ed25519-signed audit log
-- ✅ Abstract `DeviceBridge` Protocol + ADB + Mock + **Termux** implementations
+- ✅ Abstract `DeviceBridge` Protocol + ADB + Mock + Termux implementations
 - ✅ Runtime orchestrator that ties it all together
-- ✅ **Interactive web permission UI** — browser dashboard, live terminal stream, per-call approve/deny
-- ✅ **HTTP agent API** — AI agents call `POST /agent/call` with a token, runtime handles the rest
-- ✅ **WebSocket** — live updates of pending requests + agent terminal
+- ✅ **Session-based pairing** — one-time approval → full access until TTL/disconnect
+- ✅ **Bootstrap token auth** — only the AI with the bootstrap token can request pairing
+- ✅ **User-set TTL** — human picks session duration at pairing time (1m to 365d)
+- ✅ **Live disconnect** — human can revoke any session instantly from dashboard
+- ✅ **Live terminal stream** — every AI request/result/error shown in real time
+- ✅ **Audit log** — every call recorded with signed hash chain
+- ✅ **WebSocket** — live dashboard updates (terminal + pending pairings + active sessions)
 - ✅ Optional MCP server layer (`pip install adroid[mcp]`)
+- ✅ Up to 20 concurrent AI sessions per runtime
 
 ## Architecture
 
@@ -39,11 +43,18 @@ hash-chained, append-only audit log.
                 │   any chat agent / script / IDE plugin   │
                 └──────────────────┬───────────────────────┘
                                    │
-                                   │ POST /agent/call/async
-                                   │   { token, tool, args }
+                                   │ 1. POST /agent/session/request
+                                   │    { bootstrap_token, agent_id }
+                                   │
+                                   │ 5. GET /agent/session/{pairing_id}
+                                   │    poll until approved
+                                   │
+                                   │ 6. POST /agent/call
+                                   │    { session_token, tool, args }
+                                   │    (no per-action approval!)
                                    ▼
                 ┌──────────────────────────────────────────┐
-                │      LAPTOP (server + monitor UI)        │
+                │      LAPTOP (self-hosted server)         │
                 │  ┌────────────────────────────────────┐  │
                 │  │  Adroid Runtime (Python)           │  │
                 │  │  ┌──────────┐  ┌────────────────┐  │  │
@@ -51,9 +62,10 @@ hash-chained, append-only audit log.
                 │  │  │ (typed)  │  │ (signed chain) │  │  │
                 │  │  └──────────┘  └────────────────┘  │  │
                 │  │  ┌────────────────────────────────┐ │  │
-                │  │  │ InteractiveGate                │ │  │
-                │  │  │  ├── READ scope: auto-approve  │ │  │
-                │  │  │  └── ACT/ADMIN: block + URL    │ │  │
+                │  │  │ SessionManager                 │ │  │
+                │  │  │  ├── PairingRequest (pending)  │ │  │
+                │  │  │  ├── Session (TTL, revocable)  │ │  │
+                │  │  │  └── Bootstrap token (1x use)  │ │  │
                 │  │  └────────────────────────────────┘ │  │
                 │  │  ┌────────────────────────────────┐ │  │
                 │  │  │ AdbBridge → ADB → USB/WiFi     │ │  │
@@ -61,8 +73,9 @@ hash-chained, append-only audit log.
                 │  └────────────────────────────────────┘  │
                 │                                          │
                 │  Browser (your laptop):                  │
-                │    /ui  →  approve/deny + live terminal  │
-                │             + screenshot preview         │
+                │    /ui  →  approve pairing + TTL         │
+                │             + live terminal stream       │
+                │             + disconnect button          │
                 └──────────────────┬───────────────────────┘
                                    │
                                    │ ADB (USB cable or WiFi)
@@ -75,27 +88,23 @@ hash-chained, append-only audit log.
                 └──────────────────────────────────────────┘
 ```
 
-### Async agent flow (the main use case)
+### Pairing flow (one-time approval, then full access)
 
-For chat-based AI agents (like the one talking to you right now) that
-can't hold long-lived HTTP connections:
+1. **Runtime boots** on laptop → prints a **bootstrap_token** to stderr.
+2. **AI agent** POSTs `bootstrap_token` + `agent_id` to `/agent/session/request`.
+3. **Server** creates a `PairingRequest`, returns `{pairing_id, pairing_url}`.
+4. **AI agent** shares the `pairing_url` with the human in chat.
+5. **Human** opens `pairing_url` in browser → dashboard shows the pairing request with a TTL selector.
+6. **Human** picks TTL (1m, 5m, 1h, 6h, 24h, 7d, or custom) → taps **Approve & Connect**.
+7. **Server** mints a session token with ALL capabilities at ACT scope, TTL-set.
+8. **AI agent** polls `/agent/session/{pairing_id}` → gets the session_token.
+9. **AI agent** now calls `/agent/call` freely — no per-action approval. Every call is audited + streamed to the dashboard terminal.
+10. **Session ends** when:
+    - TTL expires (token's `expires_at` fires)
+    - Human clicks **Disconnect** in dashboard (token_id added to revoke list)
+    - Runtime restarts (in-memory state lost)
 
-1. **Agent** POSTs to `/agent/call/async` with `{token, tool, args}`.
-2. **Server** validates token + scope + rate limit.
-   - READ scope → executes immediately, returns `{status: "completed", result: {...}}`.
-   - ACT/ADMIN scope → registers pending approval, returns `{status: "pending_approval", approval_id, approval_url}`.
-3. **Agent** shares the `approval_url` with the human (via chat, email, whatever).
-4. **Human** opens `approval_url` in browser → dashboard scrolls to + highlights the pending card.
-5. **Human** taps **Approve** or **Deny**.
-6. **Agent** polls `/agent/result/{approval_id}` every 1–3 seconds.
-   - `state: "pending"` → keep polling
-   - `state: "completed"` → read `result`, continue
-   - `state: "denied"` / `"timeout"` / `"error"` → handle gracefully
-7. **Audit log** records every step (request, approval, execution, result).
-
-This is the flow we just used to test — and it works. The agent never
-holds a connection open; the human can take as long as they want to
-approve; everything is signed and replayable.
+**No per-action approval.** One pairing → full access until expiry/disconnect. Audit log records every call; live terminal stream shows what the AI is doing in real time.
 
 ## Install
 
@@ -204,87 +213,106 @@ agent API without any hardware.
 
 ## Using the agent API
 
-### Async flow (recommended for chat-based agents)
+### Step 1: Request pairing (once per session)
 
 ```python
 import requests
 import time
 
 RUNTIME_URL = "https://your-cloudflare-url.trycloudflare.com"
-TOKEN_JSON = {...}  # the starter token from runtime output
+BOOTSTRAP_TOKEN = {...}  # the bootstrap token from runtime stderr output
 
-# READ scope — completes immediately
-res = requests.post(f"{RUNTIME_URL}/agent/call/async", json={
-    "token": TOKEN_JSON,
-    "tool": "device.list",
-    "args": {},
+# Request a pairing — server creates a pending request for the human
+res = requests.post(f"{RUNTIME_URL}/agent/session/request", json={
+    "bootstrap_token": BOOTSTRAP_TOKEN,
+    "agent_id": "my-ai-agent-v1",
 }, timeout=30)
 body = res.json()
-if body["status"] == "completed":
-    devices = body["result"]["devices"]
-    print(f"Found {len(devices)} device(s)")
+pairing_id = body["pairing_id"]
+pairing_url = body["pairing_url"]
 
-# ACT scope — returns pending_approval + URL to share with the human
-res = requests.post(f"{RUNTIME_URL}/agent/call/async", json={
-    "token": TOKEN_JSON,
-    "tool": "app.launch",
-    "args": {
-        "device_id": {"kind": "adb", "value": "emulator-5554"},  # or your device serial
-        "package_name": "com.example.app",
-    },
-}, timeout=30)
-body = res.json()
-if body["status"] == "pending_approval":
-    print(f"Hey human, please approve: {body['approval_url']}")
-    # Poll until terminal
-    while True:
-        r = requests.get(f"{RUNTIME_URL}/agent/result/{body['approval_id']}", timeout=10)
-        state = r.json()
-        if state["state"] in ("completed", "denied", "timeout", "error"):
-            break
-        time.sleep(2)
-    if state["state"] == "completed":
-        print(f"Launched! result={state['result']}, approved by {state['approver']}")
-    else:
-        print(f"Failed: state={state['state']}, error={state.get('error')}")
+# Share pairing_url with the human (chat, email, whatever)
+print(f"Hey human, please approve: {pairing_url}")
+
+# Poll until decided
+while True:
+    r = requests.get(f"{RUNTIME_URL}/agent/session/{pairing_id}", timeout=10)
+    state = r.json()
+    if state["status"] in ("approved", "denied", "expired"):
+        break
+    time.sleep(2)
+
+if state["status"] != "approved":
+    print(f"Pairing failed: {state['status']}")
+    exit(1)
+
+session_token = state["session_token"]
+# Save this — use it for every /agent/call until TTL expires
 ```
 
-### Sync flow (for non-chat agents that can hold connections)
+### Step 2: Call tools freely (no per-action approval)
 
 ```python
-import requests
-
-RUNTIME_URL = "https://your-cloudflare-url.trycloudflare.com"
-TOKEN_JSON = {...}
-
-# Blocks until approval or denial (default timeout 60s, configurable on the server)
+# Once paired, the AI has full access until TTL/disconnect
 res = requests.post(f"{RUNTIME_URL}/agent/call", json={
-    "token": TOKEN_JSON,
+    "token": session_token,
+    "tool": "device.list",
+    "args": {},
+})
+devices = res.json()["result"]["devices"]
+
+res = requests.post(f"{RUNTIME_URL}/agent/call", json={
+    "token": session_token,
     "tool": "app.launch",
-    "args": {"device_id": {"kind": "adb", "value": "emulator-5554"}, "package_name": "com.example.app"},
-}, timeout=120)
-body = res.json()
-# body["ok"] is True on success, False on denial/error
-# body["approval_id"] is set if interactive approval happened
+    "args": {
+        "device_id": devices[0]["id"],  # use the device from list
+        "package_name": "com.whatsapp",
+    },
+})
+# No approval needed — already paired!
+
+res = requests.post(f"{RUNTIME_URL}/agent/call", json={
+    "token": session_token,
+    "tool": "device.screenshot",
+    "args": {"device_id": devices[0]["id"]},
+})
+blob_ref = res.json()["result"]["screenshot"]["blob_ref"]
+# Fetch the PNG bytes:
+png_bytes = requests.get(f"{RUNTIME_URL}/blob/{blob_ref}/raw").content
 ```
+
+### Step 3: Handle revocation gracefully
+
+If the human clicks Disconnect (or TTL expires), the next `/agent/call`
+returns:
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "adroid.session.revoked",
+    "message": "session has been disconnected by the user"
+  }
+}
+```
+
+The AI should detect this and request a new pairing.
 
 ### Endpoints summary
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| POST | `/agent/call` | Sync agent call (blocks on approval) |
-| POST | `/agent/call/async` | Async agent call (returns approval URL for ACT scope) |
-| GET | `/agent/result/{approval_id}` | Poll for async result |
-| GET | `/api/pending` | List pending approvals (browser dashboard uses this) |
-| POST | `/api/approve/{approval_id}` | Approve a pending request (browser-only) |
-| POST | `/api/deny/{approval_id}` | Deny a pending request (browser-only) |
-| GET | `/api/history` | Past approvals (capped at 100) |
-| GET | `/api/terminal` | Agent terminal history |
+| POST | `/agent/session/request` | AI requests pairing (needs bootstrap_token) |
+| GET | `/agent/session/{pairing_id}` | AI polls for session_token |
+| POST | `/agent/call` | AI executes a tool (needs session_token) |
+| GET | `/api/state` | Dashboard: pairings + sessions + terminal |
 | GET | `/api/audit` | Audit log tail |
 | GET | `/api/tools` | Registered tool specs |
-| GET | `/blob/{blob_ref}` | Screenshot metadata |
+| POST | `/api/pair/{pairing_id}/approve` | Browser: approve with TTL |
+| POST | `/api/pair/{pairing_id}/deny` | Browser: deny |
+| POST | `/api/session/{session_id}/disconnect` | Browser: revoke session |
 | GET | `/blob/{blob_ref}/raw` | Screenshot PNG bytes |
-| WS | `/ws` | Live terminal + pending updates |
+| WS | `/ws` | Live terminal + state updates |
 | GET | `/ui` | Browser dashboard |
 
 ## Stability promise (v0.1.0)

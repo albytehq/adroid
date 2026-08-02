@@ -1,8 +1,11 @@
-"""Permission layer — capability token issuance, verification, gate, and
-interactive approval flow."""
+"""Permission layer — capability tokens, gate, and session-based pairing."""
 
 from adroid.permissions.gate import PermissionGate, RateLimiter
-from adroid.permissions.interactive import ApprovalBroker, InteractiveGate, PendingApproval
+from adroid.permissions.sessions import (
+    PairingRequest,
+    Session,
+    SessionManager,
+)
 from adroid.permissions.tokens import (
     TokenIssuer,
     canonical_token_payload,
@@ -17,11 +20,11 @@ from adroid.permissions.tokens import (
 )
 
 __all__ = [
-    "ApprovalBroker",
-    "InteractiveGate",
-    "PendingApproval",
+    "PairingRequest",
     "PermissionGate",
     "RateLimiter",
+    "Session",
+    "SessionManager",
     "TokenIssuer",
     "canonical_token_payload",
     "generate_signing_keypair",

@@ -1,19 +1,25 @@
 """Web server + agent HTTP API for Adroid.
 
-This module ties together:
-    - The runtime (orchestrator)
-    - The interactive gate (blocks ACT scope pending approval)
-    - An HTTP API for AI agents to call tools
-    - A browser UI for the user to approve/deny requests
-    - A WebSocket for live terminal + pending-request streaming
+Architecture (v0.1.0 final):
 
-Run with::
+    AI Agent (anywhere) ─POST /agent/session/request─→ LAPTOP (server)
+                                                       │
+    AI shares URL with human via chat                  │
+                                                       │
+    Human opens URL in browser                         │
+    Human picks TTL + taps Approve                     │
+                                                       │
+    AI polls /agent/session/{pairing_id} ──────────────┤
+                                                       │
+    Server returns session token (full access, TTL-set)│
+                                                       │
+    AI calls /agent/call freely until TTL or disconnect│
+                                                       │
+                                                       ▼
+                                                   ADB → HP
 
-    adroid-start --bridge termux --port 7654
-
-Or directly::
-
-    python -m adroid.web.server --bridge termux --port 7654
+No per-action approval. One pairing → full access. Audit log records
+every call; dashboard shows live terminal stream.
 """
 
 from __future__ import annotations
@@ -23,15 +29,14 @@ import json
 import logging
 import secrets
 import threading
-import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ValidationError
@@ -49,7 +54,8 @@ from adroid.contract.types import (
     Scope,
     Screenshot,
 )
-from adroid.permissions.interactive import ApprovalBroker, InteractiveGate, PendingApproval
+from adroid.permissions.sessions import SessionManager
+from adroid.permissions.tokens import TokenIssuer, validate_token_at
 from adroid.runtime.core import AdroidRuntime
 
 log = logging.getLogger(__name__)
@@ -59,19 +65,42 @@ _STATIC_DIR = Path(__file__).parent / "static"
 
 
 # ---------------------------------------------------------------------------
-# Request / response models (JSON over HTTP for agent API)
+# Request / response models
 # ---------------------------------------------------------------------------
 
 
-class AgentCallRequest(BaseModel):
-    """Body for POST /agent/call.
+class SessionRequest(BaseModel):
+    """Body for POST /agent/session/request.
 
-    The token is the signed CapabilityToken JSON (the integrator got it
-    out-of-band from the runtime operator).
+    The AI identifies itself with agent_id (free-form string). The
+    bootstrap_token is a long-lived CapabilityToken the runtime prints at
+    startup — it proves the AI is the one the user wants to pair (prevents
+    randos from spamming pairing requests).
     """
 
+    bootstrap_token: dict[str, Any]
+    agent_id: str
+
+
+class SessionRequestResponse(BaseModel):
+    pairing_id: str
+    pairing_url: str
+    requested_at: str
+
+
+class SessionStatusResponse(BaseModel):
+    """Response for GET /agent/session/{pairing_id} — AI polls this."""
+
+    status: str  # "pending" | "approved" | "denied" | "expired"
+    session_token: dict[str, Any] | None = None  # present only when approved
+    expires_at: str | None = None
+    decided_at: str | None = None
+    decided_by: str | None = None
+
+
+class AgentCallRequest(BaseModel):
     token: dict[str, Any]
-    tool: str  # e.g. "device.list", "device.screenshot"
+    tool: str
     args: dict[str, Any] = {}
 
 
@@ -79,45 +108,19 @@ class AgentCallResponse(BaseModel):
     ok: bool
     result: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
-    audit_event_id: str | None = None
-    approval_id: str | None = None  # present if interactive approval happened
 
 
-class AsyncAgentCallResponse(BaseModel):
-    """Response for /agent/call when async=true query param is set.
-
-    For READ scope calls: same as sync — returns immediately with result.
-    For ACT/ADMIN scope calls: returns 202 with approval_id + approval_url.
-    The agent polls /agent/result/{approval_id} until state != "pending".
-    """
-    status: str  # "completed" | "pending_approval" | "error"
-    approval_id: str | None = None
-    approval_url: str | None = None  # absolute URL the agent can share with the user
-    result: dict[str, Any] | None = None
-    error: dict[str, Any] | None = None
-
-
-class AsyncResultResponse(BaseModel):
-    """Response for /agent/result/{approval_id}."""
-    state: str  # "pending" | "approved" | "denied" | "timeout" | "completed" | "error"
-    decision: str | None = None
-    decided_at: str | None = None
-    approver: str | None = None
-    result: dict[str, Any] | None = None
-    error: dict[str, Any] | None = None
+class ApprovePairingRequest(BaseModel):
+    ttl_seconds: int  # user-set; runtime validates range
 
 
 # ---------------------------------------------------------------------------
-# Terminal stream — captures agent activity for live browser display
+# Terminal stream — live agent activity log for the browser
 # ---------------------------------------------------------------------------
 
 
 class TerminalStream:
-    """Thread-safe ring buffer of agent activity lines.
-
-    Every tool call (start, result, error) appends a line. The web UI
-    subscribes via WebSocket and receives new lines in real time.
-    """
+    """Thread-safe ring buffer of agent activity lines."""
 
     def __init__(self, capacity: int = 500) -> None:
         self._lines: list[dict[str, Any]] = []
@@ -128,7 +131,7 @@ class TerminalStream:
     def append(self, *, kind: str, text: str, **extra) -> None:
         line = {
             "ts": datetime.now(timezone.utc).isoformat(),
-            "kind": kind,  # "request" | "result" | "error" | "system"
+            "kind": kind,  # "request" | "result" | "error" | "system" | "pairing" | "session"
             "text": text,
             **extra,
         }
@@ -136,12 +139,11 @@ class TerminalStream:
             self._lines.append(line)
             if len(self._lines) > self._capacity:
                 self._lines = self._lines[-self._capacity:]
-        # Push to async subscribers
         for q in list(self._subscribers):
             try:
                 q.put_nowait(line)
             except asyncio.QueueFull:
-                pass  # drop if subscriber is slow
+                pass
 
     def history(self, limit: int = 100) -> list[dict[str, Any]]:
         with self._lock:
@@ -158,34 +160,33 @@ class TerminalStream:
 
 
 # ---------------------------------------------------------------------------
-# Server state — single instance per process
+# Server state
 # ---------------------------------------------------------------------------
 
 
 class ServerState:
-    """Holds everything the web server needs at runtime.
-
-    Constructed once at startup, passed to FastAPI via ``app.state``.
-    """
+    """Holds everything the web server needs at runtime."""
 
     def __init__(
         self,
         *,
         runtime: AdroidRuntime,
-        broker: ApprovalBroker,
-        interactive_gate: InteractiveGate,
+        session_manager: SessionManager,
+        issuer: TokenIssuer,
         terminal: TerminalStream,
         browser_session_id: str,
+        bootstrap_token: CapabilityToken,
     ):
         self.runtime = runtime
-        self.broker = broker
-        self.gate = interactive_gate
+        self.sessions = session_manager
+        self.issuer = issuer
         self.terminal = terminal
         self.browser_session_id = browser_session_id
+        self.bootstrap_token = bootstrap_token
 
 
 # ---------------------------------------------------------------------------
-# Tool dispatch — the actual work
+# Tool dispatch
 # ---------------------------------------------------------------------------
 
 
@@ -196,109 +197,7 @@ def _dispatch_tool(
     tool: str,
     args: dict[str, Any],
 ) -> dict[str, Any]:
-    """Run a tool through the interactive gate + runtime.
-
-    Returns the tool's result as a JSON-serializable dict.
-    Raises AdroidError on permission/runtime failures (caller decides
-    whether to translate to HTTP or ok=False response).
-    Raises HTTPException only for unknown tools (4xx).
-    """
-    terminal = state.terminal
-
-    # Map tool name -> (capability, required_scope, method_label, runtime_fn)
-    tool_map = {
-        "device.list": (Capability.DEVICE_LIST, Scope.READ, "list_devices"),
-        "device.observe": (Capability.DEVICE_OBSERVE, Scope.READ, "observe_device"),
-        "device.screenshot": (Capability.DEVICE_SCREENSHOT, Scope.READ, "capture_screenshot"),
-        "app.list": (Capability.APP_LIST, Scope.READ, "list_installed_apps"),
-        "app.launch": (Capability.APP_LAUNCH, Scope.ACT, "launch_app"),
-    }
-
-    if tool not in tool_map:
-        raise HTTPException(
-            status_code=404,
-            detail=f"unknown tool: {tool}",
-        )
-
-    capability, required_scope, _method_label = tool_map[tool]
-    method_label = f"runtime.{tool.replace('.', '_')}"
-
-    # Log the request to terminal stream
-    args_summary = json.dumps(args, default=str)
-    terminal.append(
-        kind="request",
-        text=f"{tool}({args_summary})",
-        subject=token.subject,
-        capability=capability.value,
-        scope=required_scope.value,
-    )
-
-    # Interactive approval (only for ACT/ADMIN scope). May raise
-    # PermissionDeniedError on denial/timeout — let it bubble.
-    approval = state.gate.authorize_interactive(
-        token,
-        capability,
-        required_scope,
-        method=method_label,
-        args=args,
-        device_id=args.get("device_id", {}).get("value") if isinstance(args.get("device_id"), dict) else None,
-    )
-
-    if approval:
-        terminal.append(
-            kind="system",
-            text=f"approved by {approval.approver or 'unknown'} (approval_id={approval.approval_id[:8]})",
-        )
-
-    # Dispatch to runtime — AdroidError bubbles up to caller
-    if tool == "device.list":
-        devices = state.runtime.list_devices(token=token)
-        return {"devices": [d.model_dump(mode="json") for d in devices]}
-
-    if tool == "device.observe":
-        did = DeviceId.model_validate(args["device_id"])
-        info = state.runtime.observe_device(token=token, device_id=did)
-        return {"device": info.model_dump(mode="json")}
-
-    if tool == "device.screenshot":
-        did = DeviceId.model_validate(args["device_id"])
-        shot = state.runtime.capture_screenshot(token=token, device_id=did)
-        return {"screenshot": shot.model_dump(mode="json")}
-
-    if tool == "app.list":
-        did = DeviceId.model_validate(args["device_id"])
-        apps = state.runtime.list_installed_apps(token=token, device_id=did)
-        return {"apps": [a.model_dump(mode="json") for a in apps]}
-
-    if tool == "app.launch":
-        did = DeviceId.model_validate(args["device_id"])
-        state.runtime.launch_app(
-            token=token,
-            device_id=did,
-            package_name=args["package_name"],
-        )
-        return {"launched": True}
-
-    # Should not reach here (tool_map check above would have 404'd)
-    raise HTTPException(status_code=500, detail="unreachable")
-
-
-def _dispatch_tool_async(
-    state: ServerState,
-    *,
-    token: CapabilityToken,
-    tool: str,
-    args: dict[str, Any],
-    request: Request,
-) -> dict[str, Any]:
-    """Async dispatch — for ACT/ADMIN scope, registers a pending approval
-    and returns immediately with the approval_id + URL.
-
-    Returns a dict with one of these shapes:
-        {"status": "completed", "result": {...}}            — READ scope, executed
-        {"status": "pending_approval", "approval_id": ..., "approval_url": ...}
-        {"status": "error", "error": {...}}
-    """
+    """Execute a tool. Assumes the session token is valid + not revoked."""
     terminal = state.terminal
 
     tool_map = {
@@ -316,143 +215,51 @@ def _dispatch_tool_async(
         )
 
     capability, required_scope = tool_map[tool]
-    method_label = f"runtime.{tool.replace('.', '_')}"
 
     args_summary = json.dumps(args, default=str)
     terminal.append(
         kind="request",
-        text=f"{tool}({args_summary}) [async]",
+        text=f"{tool}({args_summary})",
         subject=token.subject,
         capability=capability.value,
         scope=required_scope.value,
     )
 
-    # Step 1: standard token + scope + rate-limit checks (may raise AdroidError)
-    state.gate.authorize(token, capability, required_scope)
+    # Standard token + scope check (rate limit etc.)
+    state.runtime._gate.authorize(token, capability, required_scope)  # noqa: SLF001
 
-    # Step 2: if READ scope, just execute synchronously — no approval needed
-    if required_scope == Scope.READ:
-        try:
-            result = _execute_tool(state, token=token, tool=tool, args=args)
-            terminal.append(kind="result", text=f"{tool} → ok [async]")
-            return {"status": "completed", "result": result}
-        except AdroidError as exc:
-            terminal.append(kind="error", text=f"{tool} failed: {exc.code}")
-            return {
-                "status": "error",
-                "error": {
-                    "code": exc.code,
-                    "message": str(exc),
-                    "details": exc.details,
-                },
-            }
-
-    # Step 3: ACT/ADMIN scope — register pending approval, return immediately
-    approval = PendingApproval(
-        token_id=token.token_id,
-        subject=token.subject,
-        capability=capability,
-        required_scope=required_scope,
-        method=method_label,
-        args=args,
-        device_id=args.get("device_id", {}).get("value") if isinstance(args.get("device_id"), dict) else None,
-    )
-    state.broker.submit(approval)
-
-    # Build absolute approval URL for the agent to share with the user.
-    # The browser UI uses hash routing for direct approval links:
-    #   /ui#approval-{id}  → highlights + scrolls to that card
-    base_url = str(request.base_url).rstrip("/")
-    approval_url = f"{base_url}/ui#approval-{approval.approval_id}"
-
-    terminal.append(
-        kind="system",
-        text=f"pending approval {approval.approval_id[:8]} — share URL with user",
-    )
-
-    # Step 4: launch a worker thread that waits for the decision, then
-    # executes the tool (or stores denial). The agent polls /agent/result.
-    def worker():
-        decided = state.broker.wait_for_decision(
-            approval.approval_id,
-            timeout_seconds=state.gate._approval_timeout,  # noqa: SLF001
-        )
-        if decided is None or decided.decision != "approved":
-            # Denied or timed out — store an exception so /agent/result returns error
-            err_code = f"adroid.permission.interactive_{decided.decision if decided else 'unknown'}"
-            state.broker.store_error(
-                approval.approval_id,
-                PermissionDeniedError(
-                    f"interactive approval {decided.decision if decided else 'unknown'}",
-                    code=err_code,
-                ),
-            )
-            terminal.append(
-                kind="error",
-                text=f"{tool} denied/timeout (approval_id={approval.approval_id[:8]})",
-            )
-            return
-
-        # Approved — execute the tool, store result
-        terminal.append(
-            kind="system",
-            text=f"approved by {decided.approver or 'unknown'} (approval_id={approval.approval_id[:8]})",
-        )
-        try:
-            result = _execute_tool(state, token=token, tool=tool, args=args)
-            state.broker.store_result(approval.approval_id, result)
-            terminal.append(kind="result", text=f"{tool} → ok [async post-approval]")
-        except AdroidError as exc:
-            state.broker.store_error(approval.approval_id, exc)
-            terminal.append(kind="error", text=f"{tool} failed post-approval: {exc.code}")
-        except Exception as exc:
-            state.broker.store_error(approval.approval_id, exc)
-            terminal.append(kind="error", text=f"{tool} raised {type(exc).__name__}: {exc}")
-
-    threading.Thread(target=worker, daemon=True).start()
-
-    return {
-        "status": "pending_approval",
-        "approval_id": approval.approval_id,
-        "approval_url": approval_url,
-    }
-
-
-def _execute_tool(
-    state: ServerState,
-    *,
-    token: CapabilityToken,
-    tool: str,
-    args: dict[str, Any],
-) -> dict[str, Any]:
-    """Execute a tool call against the runtime. Assumes gate has already
-    authorized. Raises AdroidError on failure."""
     if tool == "device.list":
         devices = state.runtime.list_devices(token=token)
+        terminal.append(kind="result", text=f"{tool} → ok")
         return {"devices": [d.model_dump(mode="json") for d in devices]}
 
     if tool == "device.observe":
         did = DeviceId.model_validate(args["device_id"])
         info = state.runtime.observe_device(token=token, device_id=did)
+        terminal.append(kind="result", text=f"{tool} → ok")
         return {"device": info.model_dump(mode="json")}
 
     if tool == "device.screenshot":
         did = DeviceId.model_validate(args["device_id"])
         shot = state.runtime.capture_screenshot(token=token, device_id=did)
+        terminal.append(
+            kind="result",
+            text=f"{tool} → ok (blob={shot.blob_ref[:12]}…, {shot.width}x{shot.height})",
+        )
         return {"screenshot": shot.model_dump(mode="json")}
 
     if tool == "app.list":
         did = DeviceId.model_validate(args["device_id"])
         apps = state.runtime.list_installed_apps(token=token, device_id=did)
+        terminal.append(kind="result", text=f"{tool} → ok ({len(apps)} apps)")
         return {"apps": [a.model_dump(mode="json") for a in apps]}
 
     if tool == "app.launch":
         did = DeviceId.model_validate(args["device_id"])
         state.runtime.launch_app(
-            token=token,
-            device_id=did,
-            package_name=args["package_name"],
+            token=token, device_id=did, package_name=args["package_name"]
         )
+        terminal.append(kind="result", text=f"{tool} → ok")
         return {"launched": True}
 
     raise HTTPException(status_code=500, detail="unreachable")
@@ -466,22 +273,20 @@ def _execute_tool(
 def create_app(
     *,
     runtime: AdroidRuntime,
-    broker: ApprovalBroker,
-    interactive_gate: InteractiveGate,
+    session_manager: SessionManager,
+    issuer: TokenIssuer,
+    bootstrap_token: CapabilityToken,
     browser_session_id: str | None = None,
 ) -> FastAPI:
-    """Build a FastAPI app bound to the given runtime + broker + gate.
-
-    The caller is responsible for constructing the runtime, broker, and
-    gate — this function just wires them into HTTP endpoints.
-    """
+    """Build the FastAPI app."""
     terminal = TerminalStream()
     state = ServerState(
         runtime=runtime,
-        broker=broker,
-        interactive_gate=interactive_gate,
+        session_manager=session_manager,
+        issuer=issuer,
         terminal=terminal,
         browser_session_id=browser_session_id or f"browser-{secrets.token_hex(4)}",
+        bootstrap_token=bootstrap_token,
     )
 
     @asynccontextmanager
@@ -491,13 +296,24 @@ def create_app(
             kind="system",
             text=f"open /ui in your browser — session_id={state.browser_session_id}",
         )
-        yield
+        # Background cleanup of expired sessions every 60s
+        async def cleanup_loop():
+            while True:
+                await asyncio.sleep(60)
+                removed = session_manager.cleanup_expired()
+                if removed:
+                    terminal.append(
+                        kind="system",
+                        text=f"cleaned up {removed} expired session(s)",
+                    )
 
-    app = FastAPI(
-        title="Adroid Runtime",
-        version="0.1.0",
-        lifespan=lifespan,
-    )
+        task = asyncio.create_task(cleanup_loop())
+        try:
+            yield
+        finally:
+            task.cancel()
+
+    app = FastAPI(title="Adroid Runtime", version="0.1.0", lifespan=lifespan)
     app.state.adroid = state
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
     templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
@@ -521,43 +337,16 @@ def create_app(
     async def ui_alias(request: Request):
         return await index(request)
 
-    @app.get("/api/pending")
-    async def api_pending():
-        return [p.to_dict() for p in state.broker.pending()]
-
-    @app.get("/api/history")
-    async def api_history(limit: int = 50):
-        return [p.to_dict() for p in state.broker.history(limit=limit)]
-
-    @app.get("/api/terminal")
-    async def api_terminal(limit: int = 100):
-        return state.terminal.history(limit=limit)
-
-    @app.post("/api/approve/{approval_id}")
-    async def api_approve(approval_id: str):
-        ok = state.broker.resolve(
-            approval_id,
-            decision="approved",
-            approver=state.browser_session_id,
-        )
-        if not ok:
-            raise HTTPException(status_code=404, detail="approval not found or already decided")
-        return {"ok": True, "decision": "approved"}
-
-    @app.post("/api/deny/{approval_id}")
-    async def api_deny(approval_id: str):
-        ok = state.broker.resolve(
-            approval_id,
-            decision="denied",
-            approver=state.browser_session_id,
-        )
-        if not ok:
-            raise HTTPException(status_code=404, detail="approval not found or already decided")
-        return {"ok": True, "decision": "denied"}
-
-    @app.get("/api/tools")
-    async def api_tools():
-        return [t.model_dump(mode="json") for t in runtime.list_tools()]
+    @app.get("/api/state")
+    async def api_state():
+        """Single endpoint the dashboard polls for everything."""
+        return {
+            "pairings": [p.to_dict() for p in session_manager.list_pending_pairings()],
+            "sessions": [s.to_dict() for s in session_manager.list_sessions()],
+            "terminal": state.terminal.history(limit=100),
+            "issuer_id": runtime.issuer_id,
+            "browser_session_id": state.browser_session_id,
+        }
 
     @app.get("/api/audit")
     async def api_audit(limit: int = 50):
@@ -565,27 +354,139 @@ def create_app(
         events = reader.tail(n=limit)
         return [e.model_dump(mode="json") for e in events]
 
-    @app.get("/blob/{blob_ref}")
-    async def api_blob(blob_ref: str):
-        data = runtime.get_blob(blob_ref)
-        if data is None:
-            raise HTTPException(status_code=404, detail="blob not found")
-        return JSONResponse(
-            content={"blob_ref": blob_ref, "size": len(data)},
-            headers={"X-Blob-Ref": blob_ref},
-        )
+    @app.get("/api/tools")
+    async def api_tools():
+        return [t.model_dump(mode="json") for t in runtime.list_tools()]
 
-    # Blob bytes endpoint — returns raw bytes (used by browser <img>)
+    @app.post("/api/pair/{pairing_id}/approve")
+    async def api_approve_pairing(pairing_id: str, req: ApprovePairingRequest):
+        try:
+            p = session_manager.approve_pairing(
+                pairing_id=pairing_id,
+                ttl_seconds=req.ttl_seconds,
+                approver=state.browser_session_id,
+            )
+        except AdroidError as exc:
+            raise HTTPException(status_code=400, detail={"code": exc.code, "message": str(exc)})
+
+        state.terminal.append(
+            kind="pairing",
+            text=f"approved pairing {pairing_id[:8]} for agent={p.agent_id} ttl={req.ttl_seconds}s",
+        )
+        return {"ok": True, "pairing": p.to_dict()}
+
+    @app.post("/api/pair/{pairing_id}/deny")
+    async def api_deny_pairing(pairing_id: str):
+        try:
+            p = session_manager.deny_pairing(
+                pairing_id=pairing_id,
+                approver=state.browser_session_id,
+            )
+        except AdroidError as exc:
+            raise HTTPException(status_code=400, detail={"code": exc.code, "message": str(exc)})
+
+        state.terminal.append(
+            kind="pairing",
+            text=f"denied pairing {pairing_id[:8]} for agent={p.agent_id}",
+        )
+        return {"ok": True, "pairing": p.to_dict()}
+
+    @app.post("/api/session/{session_id}/disconnect")
+    async def api_disconnect_session(session_id: str):
+        ok = session_manager.disconnect_session(session_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="session not found or already revoked")
+        state.terminal.append(
+            kind="session",
+            text=f"disconnected session {session_id[:8]}",
+        )
+        return {"ok": True}
+
     @app.get("/blob/{blob_ref}/raw")
     async def api_blob_raw(blob_ref: str):
-        from fastapi.responses import Response
         data = runtime.get_blob(blob_ref)
         if data is None:
             raise HTTPException(status_code=404, detail="blob not found")
         return Response(content=data, media_type="image/png")
 
     # ------------------------------------------------------------------
-    # Agent HTTP API — what AI agents call
+    # Agent HTTP API — pairing
+    # ------------------------------------------------------------------
+
+    @app.post("/agent/session/request", response_model=SessionRequestResponse)
+    def agent_session_request(req: SessionRequest, request: Request):
+        """AI calls this to start a pairing. Returns pairing_id + URL.
+
+        The bootstrap_token must match the one the runtime printed at
+        startup. This prevents randos from spamming pairing requests.
+        """
+        # Validate bootstrap token
+        try:
+            bt = CapabilityToken.model_validate(req.bootstrap_token)
+            validate_token_at(
+                bt,
+                runtime._token_public,  # noqa: SLF001
+                expected_issuer=runtime.issuer_id,
+            )
+        except (ValidationError, PermissionDeniedError) as exc:
+            raise HTTPException(
+                status_code=401,
+                detail=f"invalid bootstrap_token: {exc}",
+            )
+
+        # Bootstrap token must be the exact one the runtime printed
+        if bt.token_id != state.bootstrap_token.token_id:
+            raise HTTPException(
+                status_code=401,
+                detail="bootstrap_token mismatch — use the one the runtime printed at startup",
+            )
+
+        try:
+            p = session_manager.request_pairing(agent_id=req.agent_id)
+        except AdroidError as exc:
+            raise HTTPException(status_code=400, detail={"code": exc.code, "message": str(exc)})
+
+        base_url = str(request.base_url).rstrip("/")
+        pairing_url = f"{base_url}/ui#pairing-{p.pairing_id}"
+
+        state.terminal.append(
+            kind="pairing",
+            text=f"pairing requested by agent={req.agent_id} (id={p.pairing_id[:8]})",
+        )
+
+        return SessionRequestResponse(
+            pairing_id=p.pairing_id,
+            pairing_url=pairing_url,
+            requested_at=p.requested_at.isoformat(),
+        )
+
+    @app.get("/agent/session/{pairing_id}", response_model=SessionStatusResponse)
+    def agent_session_status(pairing_id: str):
+        """AI polls this until status != 'pending'. When approved, the
+        response includes the session_token (full access, TTL-set)."""
+        p = session_manager.get_pairing(pairing_id)
+        if p is None:
+            raise HTTPException(status_code=404, detail=f"unknown pairing_id: {pairing_id}")
+
+        if p.status == "approved" and p.session_token_json:
+            # AI gets the token ONCE. Subsequent polls still return it but
+            # we log that it was retrieved.
+            token_obj = json.loads(p.session_token_json)
+            return SessionStatusResponse(
+                status="approved",
+                session_token=token_obj,
+                expires_at=p.session_id,  # placeholder, replaced below
+                decided_at=p.decided_at.isoformat() if p.decided_at else None,
+                decided_by=p.decided_by,
+            )
+        return SessionStatusResponse(
+            status=p.status,
+            decided_at=p.decided_at.isoformat() if p.decided_at else None,
+            decided_by=p.decided_by,
+        )
+
+    # ------------------------------------------------------------------
+    # Agent HTTP API — tool calls (no per-action approval!)
     # ------------------------------------------------------------------
 
     @app.post("/agent/call", response_model=AgentCallResponse)
@@ -598,37 +499,26 @@ def create_app(
                 detail=f"invalid token: {exc.errors()}",
             )
 
-        approval_id: str | None = None
-        try:
-            # Snapshot the broker to detect if approval happened
-            pending_before = {p.approval_id for p in state.broker.pending()}
-            result = _dispatch_tool(
-                state,
-                token=token,
-                tool=req.tool,
-                args=req.args,
-            )
-            # Detect approval ID (whichever was added and resolved during the call)
-            pending_after = {p.approval_id for p in state.broker.pending()}
-            # Easier: look at broker history
-            history = state.broker.history(limit=1)
-            if history and history[0].decision == "approved":
-                approval_id = history[0].approval_id
-
+        # Check revocation FIRST — even before standard gate validation
+        if session_manager.is_revoked(token.token_id):
             state.terminal.append(
-                kind="result",
-                text=f"{req.tool} → ok",
+                kind="error",
+                text=f"{req.tool} rejected: session revoked",
             )
             return AgentCallResponse(
-                ok=True,
-                result=result,
-                approval_id=approval_id,
+                ok=False,
+                error={
+                    "code": "adroid.session.revoked",
+                    "message": "session has been disconnected by the user",
+                },
             )
+
+        try:
+            result = _dispatch_tool(state, token=token, tool=req.tool, args=req.args)
+            return AgentCallResponse(ok=True, result=result)
         except HTTPException:
             raise
         except AdroidError as exc:
-            # Permission denied, bridge errors, etc. — return as structured
-            # response so the agent sees the typed error code.
             state.terminal.append(
                 kind="error",
                 text=f"{req.tool} failed: {exc.code} — {exc}",
@@ -656,134 +546,7 @@ def create_app(
             )
 
     # ------------------------------------------------------------------
-    # Agent HTTP API — ASYNC mode (for chat-based / non-blocking agents)
-    # ------------------------------------------------------------------
-
-    @app.post("/agent/call/async", response_model=AsyncAgentCallResponse)
-    def agent_call_async(req: AgentCallRequest, request: Request):
-        """Async variant of /agent/call. For ACT/ADMIN scope, returns
-        immediately with approval_id + approval_url. Agent polls
-        /agent/result/{approval_id} for the final result.
-
-        Use this when the agent cannot hold a long-lived HTTP connection
-        (e.g. chat-based agents like me over IM).
-
-        Equivalent to /agent/call?async=true — kept as a separate path
-        for explicitness and easier routing in proxies.
-        """
-        try:
-            token = CapabilityToken.model_validate(req.token)
-        except ValidationError as exc:
-            raise HTTPException(
-                status_code=400,
-                detail=f"invalid token: {exc.errors()}",
-            )
-
-        try:
-            outcome = _dispatch_tool_async(
-                state,
-                token=token,
-                tool=req.tool,
-                args=req.args,
-                request=request,
-            )
-        except HTTPException:
-            raise
-        except AdroidError as exc:
-            state.terminal.append(
-                kind="error",
-                text=f"{req.tool} failed: {exc.code} — {exc}",
-            )
-            return AsyncAgentCallResponse(
-                status="error",
-                error={
-                    "code": exc.code,
-                    "message": str(exc),
-                    "details": exc.details,
-                },
-            )
-        except Exception as exc:
-            state.terminal.append(
-                kind="error",
-                text=f"{req.tool} raised {type(exc).__name__}: {exc}",
-            )
-            return AsyncAgentCallResponse(
-                status="error",
-                error={
-                    "code": "adroid.unexpected",
-                    "message": str(exc),
-                    "type": type(exc).__name__,
-                },
-            )
-
-        if outcome["status"] == "pending_approval":
-            return AsyncAgentCallResponse(
-                status="pending_approval",
-                approval_id=outcome["approval_id"],
-                approval_url=outcome["approval_url"],
-            )
-        elif outcome["status"] == "completed":
-            return AsyncAgentCallResponse(
-                status="completed",
-                result=outcome["result"],
-            )
-        else:
-            return AsyncAgentCallResponse(
-                status="error",
-                error=outcome.get("error", {"code": "adroid.unknown", "message": "unknown error"}),
-            )
-
-    @app.get("/agent/result/{approval_id}", response_model=AsyncResultResponse)
-    def agent_result(approval_id: str):
-        """Poll for the result of an async agent call.
-
-        Returns the current state. Agent should keep polling every 1-3s
-        until state is "completed", "denied", "timeout", or "error".
-        """
-        status = state.broker.get_status(approval_id)
-        if status is None:
-            raise HTTPException(
-                status_code=404,
-                detail=f"unknown approval_id: {approval_id}",
-            )
-
-        if status["state"] in ("completed",):
-            return AsyncResultResponse(
-                state="completed",
-                decision=status.get("decision"),
-                decided_at=status.get("decided_at"),
-                approver=status.get("approver"),
-                result=status.get("result"),
-            )
-        if status["state"] in ("error",):
-            return AsyncResultResponse(
-                state="error",
-                decision=status.get("decision"),
-                decided_at=status.get("decided_at"),
-                approver=status.get("approver"),
-                error=status.get("error"),
-            )
-        if status["state"] in ("denied", "timeout"):
-            return AsyncResultResponse(
-                state=status["state"],
-                decision=status.get("decision"),
-                decided_at=status.get("decided_at"),
-                approver=status.get("approver"),
-                error={
-                    "code": f"adroid.permission.interactive_{status['state']}",
-                    "message": f"interactive approval {status['state']}",
-                },
-            )
-        # pending or approved-but-not-yet-completed
-        return AsyncResultResponse(
-            state=status["state"],
-            decision=status.get("decision"),
-            decided_at=status.get("decided_at"),
-            approver=status.get("approver"),
-        )
-
-    # ------------------------------------------------------------------
-    # WebSocket — live terminal + pending updates
+    # WebSocket — live terminal + state updates
     # ------------------------------------------------------------------
 
     @app.websocket("/ws")
@@ -791,22 +554,26 @@ def create_app(
         await websocket.accept()
         queue = await state.terminal.subscribe()
         try:
-            # Send history on connect
             await websocket.send_json({
-                "type": "history",
-                "lines": state.terminal.history(limit=100),
-                "pending": [p.to_dict() for p in state.broker.pending()],
+                "type": "init",
+                "state": {
+                    "pairings": [p.to_dict() for p in session_manager.list_pending_pairings()],
+                    "sessions": [s.to_dict() for s in session_manager.list_sessions()],
+                    "terminal": state.terminal.history(limit=100),
+                },
             })
             while True:
-                # Poll for new terminal lines
                 try:
-                    line = await asyncio.wait_for(queue.get(), timeout=1.0)
+                    line = await asyncio.wait_for(queue.get(), timeout=2.0)
                     await websocket.send_json({"type": "terminal", "line": line})
                 except asyncio.TimeoutError:
-                    # No new line — send pending snapshot instead (cheap heartbeat)
+                    # Heartbeat with current state snapshot
                     await websocket.send_json({
-                        "type": "pending",
-                        "pending": [p.to_dict() for p in state.broker.pending()],
+                        "type": "state",
+                        "state": {
+                            "pairings": [p.to_dict() for p in session_manager.list_pending_pairings()],
+                            "sessions": [s.to_dict() for s in session_manager.list_sessions()],
+                        },
                     })
         except WebSocketDisconnect:
             pass
@@ -824,8 +591,9 @@ def create_app(
 def run_server(
     *,
     runtime: AdroidRuntime,
-    broker: ApprovalBroker,
-    interactive_gate: InteractiveGate,
+    session_manager: SessionManager,
+    issuer: TokenIssuer,
+    bootstrap_token: CapabilityToken,
     host: str = "0.0.0.0",
     port: int = 7654,
     browser_session_id: str | None = None,
@@ -835,8 +603,9 @@ def run_server(
 
     app = create_app(
         runtime=runtime,
-        broker=broker,
-        interactive_gate=interactive_gate,
+        session_manager=session_manager,
+        issuer=issuer,
+        bootstrap_token=bootstrap_token,
         browser_session_id=browser_session_id,
     )
     config = uvicorn.Config(
@@ -844,7 +613,7 @@ def run_server(
         host=host,
         port=port,
         log_level="info",
-        access_log=False,  # too noisy for terminal-stream UX
+        access_log=False,
     )
     server = uvicorn.Server(config)
     server.run()

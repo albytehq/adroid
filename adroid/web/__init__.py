@@ -1,11 +1,13 @@
-"""Web layer — FastAPI server with permission UI + agent HTTP API + WebSocket."""
+"""Web layer — FastAPI server with session-based pairing + agent HTTP API."""
 
 from adroid.web.server import (
     AgentCallRequest,
     AgentCallResponse,
-    AsyncAgentCallResponse,
-    AsyncResultResponse,
+    ApprovePairingRequest,
     ServerState,
+    SessionRequest,
+    SessionRequestResponse,
+    SessionStatusResponse,
     TerminalStream,
     create_app,
     run_server,
@@ -14,9 +16,11 @@ from adroid.web.server import (
 __all__ = [
     "AgentCallRequest",
     "AgentCallResponse",
-    "AsyncAgentCallResponse",
-    "AsyncResultResponse",
+    "ApprovePairingRequest",
     "ServerState",
+    "SessionRequest",
+    "SessionRequestResponse",
+    "SessionStatusResponse",
     "TerminalStream",
     "create_app",
     "run_server",

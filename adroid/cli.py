@@ -1,23 +1,26 @@
-"""``adroid-start`` CLI — boot the runtime + web server + (optional) bridge.
+"""``adroid-start`` CLI — boot the runtime + web server + bridge.
+
+Architecture: laptop-hosted runtime, ADB bridge to a USB-connected phone,
+session-based pairing (one-time approval → full access until TTL/disconnect).
 
 Usage::
 
     # Mock bridge (no phone needed — for dev / demo)
     adroid-start --bridge mock --port 7654
 
-    # Termux bridge (run inside Termux on the phone)
-    adroid-start --bridge termux --port 7654
+    # ADB bridge (primary mode — laptop controlling a USB-connected phone)
+    adroid-start --bridge adb --port 7654
 
-    # ADB bridge (laptop controlling a USB-connected phone)
-    adroid-start --bridge adb --port 7654 --adb-path /usr/bin/adb
+    # Termux bridge (runtime runs on the phone itself via Termux)
+    adroid-start --bridge termux --port 7654
 
 After startup:
     1. Open http://localhost:7654/ui in your browser.
-    2. Use ``adroid-issue-token`` to mint a token for an AI agent.
-    3. The agent POSTs to http://localhost:7654/agent/call with the token.
-
-For remote access (so an AI agent on the internet can reach your runtime),
-expose port 7654 via ngrok or cloudflared.
+    2. The runtime prints a bootstrap_token — give it to your AI agent.
+    3. AI calls POST /agent/session/request with the bootstrap_token.
+    4. Browser shows the pairing request → pick TTL → Approve.
+    5. AI gets a session_token, can now call any tool freely.
+    6. Click Disconnect in browser to revoke anytime.
 """
 
 from __future__ import annotations
@@ -30,14 +33,16 @@ from pathlib import Path
 
 from adroid.bridge.adb import AdbBridge, LocalBlobStore
 from adroid.bridge.mock import InMemoryBlobStore, MockBridge
-from adroid.permissions.interactive import ApprovalBroker, InteractiveGate
+from adroid.contract.types import Capability, Scope
+from adroid.permissions.sessions import SessionManager
+from adroid.permissions.tokens import TokenIssuer
 from adroid.runtime.core import AdroidRuntime
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="adroid-start",
-        description="Start the Adroid runtime + web permission UI.",
+        description="Start the Adroid runtime + web pairing UI.",
     )
     parser.add_argument(
         "--bridge",
@@ -45,47 +50,17 @@ def main() -> None:
         default="mock",
         help="Device bridge to use. Default: mock (no real device).",
     )
+    parser.add_argument("--port", type=int, default=7654, help="HTTP port. Default 7654.")
+    parser.add_argument("--host", default="0.0.0.0", help="Bind address. Default 0.0.0.0.")
+    parser.add_argument("--audit-log", default="./adroid.auditlog", help="Audit log path.")
+    parser.add_argument("--blob-store-dir", default="./adroid_blobs", help="Blob store dir.")
+    parser.add_argument("--adb-path", default=None, help="Path to adb binary (ADB bridge).")
+    parser.add_argument("--issuer-id", default=None, help="Runtime issuer ID. Default random.")
     parser.add_argument(
-        "--port",
+        "--max-sessions",
         type=int,
-        default=7654,
-        help="HTTP port for web UI + agent API. Default: 7654.",
-    )
-    parser.add_argument(
-        "--host",
-        default="0.0.0.0",
-        help="Bind address. Default 0.0.0.0 (all interfaces).",
-    )
-    parser.add_argument(
-        "--audit-log",
-        default="./adroid.auditlog",
-        help="Path to the audit log file. Default ./adroid.auditlog.",
-    )
-    parser.add_argument(
-        "--blob-store-dir",
-        default="./adroid_blobs",
-        help="Directory for screenshot blobs (ADB/Termux bridges). Default ./adroid_blobs.",
-    )
-    parser.add_argument(
-        "--adb-path",
-        default=None,
-        help="Path to adb binary (ADB bridge only). Defaults to PATH lookup.",
-    )
-    parser.add_argument(
-        "--issuer-id",
-        default=None,
-        help="Runtime issuer ID. Defaults to random.",
-    )
-    parser.add_argument(
-        "--approval-timeout",
-        type=float,
-        default=60.0,
-        help="Seconds to wait for interactive approval before denying. Default 60.",
-    )
-    parser.add_argument(
-        "--require-approval-for-read",
-        action="store_true",
-        help="Require interactive approval even for READ scope (default: only ACT/ADMIN).",
+        default=20,
+        help="Max concurrent AI sessions. Default 20.",
     )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
@@ -96,13 +71,12 @@ def main() -> None:
     )
 
     # ------------------------------------------------------------------
-    # Construct bridge + blob store
+    # Bridge + blob store
     # ------------------------------------------------------------------
 
     if args.bridge == "mock":
         blob_store = InMemoryBlobStore()
         bridge = MockBridge(blob_store=blob_store)
-        # Pre-populate one mock device so the runtime is usable out of the box
         from adroid.contract.types import DeviceId, DeviceInfo, DeviceState
         bridge.add_device(
             DeviceInfo(
@@ -122,7 +96,6 @@ def main() -> None:
         if not TermuxBridge.is_termux():
             sys.stderr.write(
                 "WARNING: --bridge termux selected but we don't appear to be inside Termux.\n"
-                "         Most commands will fail. Did you mean --bridge mock?\n"
             )
     elif args.bridge == "adb":
         blob_store = LocalBlobStore(args.blob_store_dir)
@@ -132,7 +105,7 @@ def main() -> None:
         sys.exit(2)
 
     # ------------------------------------------------------------------
-    # Construct runtime (gives us token issuer + audit + standard gate)
+    # Runtime
     # ------------------------------------------------------------------
 
     runtime = AdroidRuntime(
@@ -143,36 +116,29 @@ def main() -> None:
     )
 
     # ------------------------------------------------------------------
-    # Construct interactive gate + broker (shares runtime's keys)
+    # Session manager + bootstrap token
     # ------------------------------------------------------------------
-
-    broker = ApprovalBroker()
-    interactive_gate = InteractiveGate(
+    # The bootstrap token is what the AI uses to call /agent/session/request.
+    # It is long-lived (30 days), only allows the pairing endpoint (enforced
+    # by the endpoint, not the token itself). It does NOT grant any tool
+    # capability — the AI gets a separate session_token after pairing.
+    issuer = TokenIssuer(
         issuer_id=runtime.issuer_id,
-        public_key=runtime._token_public,  # noqa: SLF001 — same-package
-        broker=broker,
-        approval_timeout_seconds=args.approval_timeout,
-        require_approval_for_read=args.require_approval_for_read,
+        signing_key=runtime._token_private,  # noqa: SLF001
+        public_key=runtime._token_public,  # noqa: SLF001
+    )
+    session_manager = SessionManager(
+        issuer=issuer,
+        max_sessions=args.max_sessions,
     )
 
-    # ------------------------------------------------------------------
-    # Construct a "blessed" token for the browser session owner
-    # ------------------------------------------------------------------
-    # v0.1.0 simplicity: print a starter agent token to stderr so the
-    # operator can immediately test the agent API without running
-    # `adroid-issue-token` separately. Real deployments revoke this after
-    # issuing proper per-agent tokens.
-    from adroid.contract.types import Capability, Scope
-    starter_token = runtime.issue_token(
-        subject="starter-agent",
-        grants=[(cap, Scope.ACT) for cap in [
-            Capability.DEVICE_LIST,
-            Capability.DEVICE_OBSERVE,
-            Capability.DEVICE_SCREENSHOT,
-            Capability.APP_LIST,
-            Capability.APP_LAUNCH,
-        ]],
-        ttl_seconds=86400,  # 24h
+    # Bootstrap token: long-lived, NO grants (it's only used for /agent/session/request
+    # which checks token_id match, not grants).
+    from datetime import timedelta
+    bootstrap_token = issuer.issue(
+        subject="bootstrap",
+        grants=[],  # no tool capabilities — only used for pairing
+        ttl=timedelta(days=30),
     )
 
     browser_session_id = f"browser-{secrets.token_hex(4)}"
@@ -184,34 +150,42 @@ def main() -> None:
     print("=" * 70, file=sys.stderr)
     print("Adroid runtime ready.", file=sys.stderr)
     print(file=sys.stderr)
-    print(f"  Web UI:        http://localhost:{args.port}/ui", file=sys.stderr)
-    print(f"  Agent API:     http://localhost:{args.port}/agent/call", file=sys.stderr)
-    print(f"  WebSocket:     ws://localhost:{args.port}/ws", file=sys.stderr)
-    print(f"  Audit log:     {args.audit_log}", file=sys.stderr)
-    print(f"  Bridge:        {args.bridge}", file=sys.stderr)
-    print(f"  Issuer ID:     {runtime.issuer_id}", file=sys.stderr)
-    print(f"  Session ID:    {browser_session_id}", file=sys.stderr)
+    print(f"  Web UI:          http://localhost:{args.port}/ui", file=sys.stderr)
+    print(f"  Agent API:       http://localhost:{args.port}/agent/call", file=sys.stderr)
+    print(f"  Pairing API:     http://localhost:{args.port}/agent/session/request", file=sys.stderr)
+    print(f"  WebSocket:       ws://localhost:{args.port}/ws", file=sys.stderr)
+    print(f"  Audit log:       {args.audit_log}", file=sys.stderr)
+    print(f"  Bridge:          {args.bridge}", file=sys.stderr)
+    print(f"  Issuer ID:       {runtime.issuer_id}", file=sys.stderr)
+    print(f"  Browser session: {browser_session_id}", file=sys.stderr)
+    print(f"  Max sessions:    {args.max_sessions}", file=sys.stderr)
     print(file=sys.stderr)
-    print("Starter agent token (24h TTL, ACT scope on all 5 tools):", file=sys.stderr)
+    print("Bootstrap token (give this to your AI agent):", file=sys.stderr)
     print(file=sys.stderr)
-    print(starter_token.model_dump_json(), file=sys.stderr)
+    print(bootstrap_token.model_dump_json(), file=sys.stderr)
     print(file=sys.stderr)
-    print("To expose to the internet: ngrok http " + str(args.port), file=sys.stderr)
+    print("Agent flow:", file=sys.stderr)
+    print("  1. AI POSTs bootstrap_token + agent_id to /agent/session/request", file=sys.stderr)
+    print("  2. AI gets back pairing_url → shares it with you in chat", file=sys.stderr)
+    print("  3. You open the URL → pick TTL → Approve", file=sys.stderr)
+    print("  4. AI polls /agent/session/{pairing_id} → gets session_token", file=sys.stderr)
+    print("  5. AI calls /agent/call freely with session_token", file=sys.stderr)
+    print("  6. Click Disconnect in browser to revoke", file=sys.stderr)
+    print(file=sys.stderr)
+    print("To expose to the internet: cloudflared tunnel --url http://localhost:" + str(args.port), file=sys.stderr)
     print("=" * 70, file=sys.stderr)
 
-    # Lazy import so non-web installs don't fail
     try:
         from adroid.web.server import run_server
-    except ImportError as exc:
-        sys.stderr.write(
-            "web extras not installed. Install with: pip install adroid[web]\n"
-        )
+    except ImportError:
+        sys.stderr.write("web extras not installed. Install with: pip install adroid[web]\n")
         sys.exit(2)
 
     run_server(
         runtime=runtime,
-        broker=broker,
-        interactive_gate=interactive_gate,
+        session_manager=session_manager,
+        issuer=issuer,
+        bootstrap_token=bootstrap_token,
         host=args.host,
         port=args.port,
         browser_session_id=browser_session_id,

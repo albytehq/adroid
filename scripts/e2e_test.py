@@ -1,5 +1,15 @@
 #!/usr/bin/env python
-"""End-to-end test: boot runtime, simulate agent call + browser approval."""
+"""End-to-end test: session pairing flow.
+
+Simulates the actual usage pattern:
+    1. AI POSTs bootstrap_token to /agent/session/request
+    2. Server returns pairing_id + pairing_url
+    3. AI shares pairing_url with human
+    4. Human opens URL, picks TTL, taps Approve
+    5. AI polls /agent/session/{pairing_id} → gets session_token
+    6. AI calls /agent/call freely (no per-action approval!)
+    7. Human clicks Disconnect → AI gets revoked
+"""
 
 from __future__ import annotations
 
@@ -13,7 +23,6 @@ import requests
 
 
 def drain_stdout(proc, sink: list):
-    """Read proc.stdout line by line, append to sink. Returns when EOF."""
     for line in proc.stdout:
         sink.append(line.rstrip())
 
@@ -30,10 +39,11 @@ def wait_for_server(base: str, timeout: float = 10.0) -> bool:
     return False
 
 
-def find_starter_token(lines: list[str]) -> dict | None:
+def find_bootstrap_token(lines: list[str]) -> dict | None:
+    """Find the bootstrap token JSON in the runtime's stdout."""
     for line in lines:
         s = line.strip()
-        if s.startswith('{"token_id"'):
+        if s.startswith('{"token_id"') and '"subject":"bootstrap"' in s:
             try:
                 return json.loads(s)
             except json.JSONDecodeError:
@@ -41,30 +51,16 @@ def find_starter_token(lines: list[str]) -> dict | None:
     return None
 
 
-def wait_for_pending(base: str, timeout: float = 5.0) -> str | None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            res = requests.get(f"{base}/api/pending", timeout=1)
-            pending = res.json()
-            if pending:
-                return pending[0]["approval_id"]
-        except requests.exceptions.ConnectionError:
-            pass
-        time.sleep(0.1)
-    return None
-
-
 def main() -> None:
-    print("=== Adroid end-to-end test: agent + browser approval ===\n")
+    print("=== Adroid end-to-end test: session pairing flow ===\n")
 
     proc = subprocess.Popen(
         [
             sys.executable, "-m", "adroid.cli",
             "--bridge", "mock",
-            "--port", "17657",
-            "--audit-log", "/tmp/adroid-e2e3.auditlog",
-            "--approval-timeout", "60",
+            "--port", "17660",
+            "--audit-log", "/tmp/adroid-pairing-e2e.auditlog",
+            "--max-sessions", "20",
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -77,135 +73,152 @@ def main() -> None:
     drain_thread.start()
 
     try:
-        base = "http://localhost:17657"
+        base = "http://localhost:17660"
         if not wait_for_server(base):
             print("FAILED: server did not come up")
             print("\n".join(stdout_lines))
             return
 
-        # Find the starter token from captured stdout
-        token = None
+        # Find bootstrap token from captured stdout
+        bootstrap = None
         for _ in range(50):
-            token = find_starter_token(stdout_lines)
-            if token:
+            bootstrap = find_bootstrap_token(stdout_lines)
+            if bootstrap:
                 break
             time.sleep(0.1)
 
-        if not token:
-            print("FAILED: did not see starter token")
+        if not bootstrap:
+            print("FAILED: did not see bootstrap token in stdout")
             print("\n".join(stdout_lines))
             return
 
-        print(f"Server ready. Token subject={token['subject']}, grants={len(token['grants'])}\n")
+        print(f"Server ready. Bootstrap token subject={bootstrap['subject']}\n")
 
-        # Test 1: device.list
-        print("--- Test 1: device.list (READ scope, auto-approved) ---")
+        # Test 1: Request pairing
+        print("--- Test 1: AI requests pairing ---")
+        res = requests.post(f"{base}/agent/session/request", json={
+            "bootstrap_token": bootstrap,
+            "agent_id": "agent:e2e-test",
+        })
+        body = res.json()
+        print(f"  pairing_id={body['pairing_id'][:8]}")
+        print(f"  pairing_url={body['pairing_url']}")
+        assert body["pairing_id"]
+        assert "/ui#pairing-" in body["pairing_url"]
+        pairing_id = body["pairing_id"]
+
+        # Test 2: AI polls — should be pending
+        print("\n--- Test 2: AI polls (should be pending) ---")
+        res = requests.get(f"{base}/agent/session/{pairing_id}")
+        body = res.json()
+        print(f"  status={body['status']}")
+        assert body["status"] == "pending"
+
+        # Test 3: Human approves with TTL=3600s
+        print("\n--- Test 3: Human approves (TTL=3600s) ---")
+        res = requests.post(f"{base}/api/pair/{pairing_id}/approve", json={"ttl_seconds": 3600})
+        print(f"  approved={res.json()['pairing']['status']}")
+        assert res.json()["pairing"]["status"] == "approved"
+
+        # Test 4: AI polls — should now have session_token
+        print("\n--- Test 4: AI polls (should have session_token) ---")
+        res = requests.get(f"{base}/agent/session/{pairing_id}")
+        body = res.json()
+        print(f"  status={body['status']}")
+        print(f"  session_token subject={body['session_token']['subject']}")
+        print(f"  session_token grants count={len(body['session_token']['grants'])}")
+        assert body["status"] == "approved"
+        assert body["session_token"]["subject"] == "session:agent:e2e-test"
+        assert len(body["session_token"]["grants"]) == 12  # all capabilities
+        session_token = body["session_token"]
+        session_id = session_token["token_id"]
+
+        # Test 5: AI calls /agent/call freely — NO per-action approval
+        print("\n--- Test 5: AI calls device.list (no approval needed!) ---")
         res = requests.post(f"{base}/agent/call", json={
-            "token": token, "tool": "device.list", "args": {},
+            "token": session_token, "tool": "device.list", "args": {},
         })
         body = res.json()
         print(f"  ok={body['ok']}, devices={len(body.get('result', {}).get('devices', []))}")
         assert body["ok"] is True
 
-        # Test 2: device.observe
-        print("\n--- Test 2: device.observe (READ scope) ---")
+        print("\n--- Test 6: AI calls app.launch (ACT scope, no approval!) ---")
         res = requests.post(f"{base}/agent/call", json={
-            "token": token,
-            "tool": "device.observe",
-            "args": {"device_id": {"kind": "adb", "value": "mock-emulator-5554"}},
+            "token": session_token,
+            "tool": "app.launch",
+            "args": {
+                "device_id": {"kind": "adb", "value": "mock-emulator-5554"},
+                "package_name": "com.example.app",
+            },
         })
         body = res.json()
-        print(f"  ok={body['ok']}, model={body.get('result', {}).get('device', {}).get('model')}")
-        assert body["ok"] is True
-
-        # Test 3: app.launch (ACT scope, requires approval)
-        print("\n--- Test 3: app.launch (ACT scope, requires browser approval) ---")
-        result_holder: dict = {}
-
-        def agent_call():
-            res = requests.post(f"{base}/agent/call", json={
-                "token": token,
-                "tool": "app.launch",
-                "args": {
-                    "device_id": {"kind": "adb", "value": "mock-emulator-5554"},
-                    "package_name": "com.example.app",
-                },
-            }, timeout=60)
-            result_holder["body"] = res.json()
-
-        t = threading.Thread(target=agent_call)
-        t.start()
-
-        approval_id = wait_for_pending(base, timeout=5.0)
-        assert approval_id, f"No pending approval appeared. stdout:\n{chr(10).join(stdout_lines[-20:])}"
-        print(f"  Found pending: {approval_id[:8]}")
-        # Pull details
-        pending = requests.get(f"{base}/api/pending").json()[0]
-        print(f"    subject={pending['subject']}, cap={pending['capability']}, scope={pending['required_scope']}")
-        print(f"    args={pending['args']}")
-
-        print("  -> Approving via /api/approve ...")
-        res = requests.post(f"{base}/api/approve/{approval_id}")
-        assert res.json()["decision"] == "approved"
-
-        t.join(timeout=5)
-        body = result_holder["body"]
         print(f"  ok={body['ok']}, launched={body.get('result', {}).get('launched')}")
         assert body["ok"] is True
 
-        # Test 4: Audit log
-        print("\n--- Test 4: Audit log ---")
-        events = requests.get(f"{base}/api/audit").json()
-        print(f"  events: {len(events)}")
-        for e in events[-3:]:
-            print(f"    [{e.get('outcome')}] {e.get('method')}")
+        print("\n--- Test 7: AI calls device.screenshot ---")
+        res = requests.post(f"{base}/agent/call", json={
+            "token": session_token,
+            "tool": "device.screenshot",
+            "args": {"device_id": {"kind": "adb", "value": "mock-emulator-5554"}},
+        })
+        body = res.json()
+        blob_ref = body["result"]["screenshot"]["blob_ref"]
+        res = requests.get(f"{base}/blob/{blob_ref}/raw")
+        print(f"  ok={body['ok']}, screenshot={len(res.content)} bytes (PNG={res.content[:4] == b'\\x89PNG'})")
 
-        # Test 5: Terminal history
-        print("\n--- Test 5: Terminal history ---")
-        lines = requests.get(f"{base}/api/terminal").json()
-        print(f"  lines: {len(lines)}")
-        for line in lines[-6:]:
-            print(f"    [{line['kind']}] {line['text']}")
-
-        # Test 6: Denial flow
-        print("\n--- Test 6: app.launch DENIED ---")
-        result_holder = {}
-
-        def agent_call2():
+        # Test 8: Multiple rapid calls — prove no per-action blocking
+        print("\n--- Test 8: 5 rapid calls (no blocking) ---")
+        start = time.monotonic()
+        for i in range(5):
             res = requests.post(f"{base}/agent/call", json={
-                "token": token,
-                "tool": "app.launch",
-                "args": {
-                    "device_id": {"kind": "adb", "value": "mock-emulator-5554"},
-                    "package_name": "com.evil.app",
-                },
-            }, timeout=60)
-            result_holder["body"] = res.json()
+                "token": session_token, "tool": "device.list", "args": {},
+            })
+            assert res.json()["ok"] is True
+        elapsed = time.monotonic() - start
+        print(f"  5 calls in {elapsed:.2f}s (no blocking, no approval)")
 
-        t = threading.Thread(target=agent_call2)
-        t.start()
+        # Test 9: Human disconnects
+        print("\n--- Test 9: Human disconnects session ---")
+        res = requests.post(f"{base}/api/session/{session_id}/disconnect")
+        print(f"  disconnected={res.json()['ok']}")
+        assert res.json()["ok"] is True
 
-        approval_id = wait_for_pending(base, timeout=5.0)
-        assert approval_id, "No pending approval for denial test"
-        pending = requests.get(f"{base}/api/pending").json()[0]
-        print(f"  Found pending: {approval_id[:8]} (pkg={pending['args']['package_name']})")
-
-        print("  -> Denying via /api/deny ...")
-        requests.post(f"{base}/api/deny/{approval_id}")
-
-        t.join(timeout=5)
-        body = result_holder["body"]
+        # Test 10: AI's next call should be rejected
+        print("\n--- Test 10: AI's next call (should be rejected) ---")
+        res = requests.post(f"{base}/agent/call", json={
+            "token": session_token, "tool": "device.list", "args": {},
+        })
+        body = res.json()
         print(f"  ok={body['ok']}, error_code={body.get('error', {}).get('code')}")
         assert body["ok"] is False
-        assert body["error"]["code"] == "adroid.permission.interactive_denied"
+        assert body["error"]["code"] == "adroid.session.revoked"
+
+        # Test 11: Check audit log
+        print("\n--- Test 11: Audit log ---")
+        events = requests.get(f"{base}/api/audit?limit=20").json()
+        print(f"  events: {len(events)}")
+        for e in events[-5:]:
+            print(f"    [{e.get('outcome')}] {e.get('method')}")
+
+        # Test 12: Terminal stream
+        print("\n--- Test 12: Terminal stream ---")
+        state = requests.get(f"{base}/api/state").json()
+        print(f"  terminal lines: {len(state['terminal'])}")
+        for line in state["terminal"][-6:]:
+            print(f"    [{line['kind']}] {line['text']}")
 
         print("\n" + "=" * 60)
-        print("ALL TESTS PASSED. End-to-end flow works:")
-        print("  - READ scope auto-approved")
-        print("  - ACT scope requires browser approval")
-        print("  - Approval -> call proceeds, audit logged")
-        print("  - Denial -> structured error returned")
-        print("  - Terminal stream captures every step")
+        print("ALL PAIRING FLOW TESTS PASSED.")
+        print()
+        print("Architecture verified:")
+        print("  1. AI boots → gets bootstrap_token from runtime output")
+        print("  2. AI POSTs bootstrap_token + agent_id → gets pairing_url")
+        print("  3. AI shares pairing_url with human in chat")
+        print("  4. Human opens URL → picks TTL → Approve")
+        print("  5. AI polls → gets session_token (full access, TTL-set)")
+        print("  6. AI calls /agent/call FREELY — no per-action approval")
+        print("  7. Human clicks Disconnect → AI immediately revoked")
+        print("  8. Audit log records every call; terminal streams live")
         print("=" * 60)
 
     finally:
