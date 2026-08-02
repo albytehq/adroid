@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 authors = [
-    { name = "albifahriza", email = "founder@adroid.dev" },
+    { name = "albifahriza", email = "289437483+albytehq@users.noreply.github.com" },
 ]
 keywords = ["android", "ai", "agents", "mcp", "runtime", "audit", "automation"]
 classifiers = [
@@ -43,10 +43,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/albyteECO/adroid"
-Repository = "https://github.com/albyteECO/adroid"
-Documentation = "https://github.com/albyteECO/adroid/tree/main/docs"
-Issues = "https://github.com/albyteECO/adroid/issues"
+Homepage = "https://github.com/albytehq/adroid"
+Repository = "https://github.com/albytehq/adroid"
+Documentation = "https://github.com/albytehq/adroid/tree/main/docs"
+Issues = "https://github.com/albytehq/adroid/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]

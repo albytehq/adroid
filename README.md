@@ -63,7 +63,7 @@ from an integrator to a device that skips any layer.
 ## Install (dev)
 
 ```bash
-git clone https://github.com/albyteECO/adroid.git
+git clone https://github.com/albytehq/adroid.git
 cd adroid
 pip install -e ".[dev,mcp]"
 pytest
