@@ -137,19 +137,53 @@ This mode is useful if you don't have a laptop or want the runtime to live on th
 
 ## Quick start
 
-### Step 1: Pair the phone (USB or WiFi)
+### Step 1: Pair the phone (USB or wireless — no USB required for Android 11+)
 
-Plug the phone in via USB, enable USB debugging in Developer Options, then:
+Three ways to connect your phone to the laptop:
+
+#### Option A: Android 11+ wireless debugging (recommended, no USB cable needed)
+
+1. On the phone: **Settings → System → Developer options → Wireless debugging** → toggle ON
+2. Tap **Pair device with pairing code** — phone shows `IP:port` and a 6-digit code
+3. On the laptop:
+   ```bash
+   adroid-pair --pair 192.168.1.42:4321 --code 123456
+   # Then connect (pairing port ≠ connect port — see phone's main wireless debugging screen for IP:port)
+   adroid-pair --connect 192.168.1.42:5555
+   ```
+4. Tap **Allow** on the phone's debugging prompt (one-time)
+
+#### Option B: USB cable (classic, works on all Android versions)
 
 ```bash
 adroid-pair --list                    # see connected devices
-adroid-pair                           # interactive verify
-adroid-pair --wireless 192.168.1.42:pairing-port --code 123456   # WiFi pairing (Android 11+)
+adroid-pair                           # auto-verify the first device
 ```
 
-The phone will show an "Allow USB debugging?" prompt with your laptop's
-RSA fingerprint. Tap **Allow** (and check "Always allow from this computer"
-to skip future prompts).
+Plug in USB cable → tap **Allow** on phone's "Allow USB debugging?" prompt.
+
+#### Option C: WiFi ADB via tcpip (Android < 11, or wireless debugging unavailable)
+
+One-time USB cable to enable tcpip mode, then wireless forever after:
+
+```bash
+adroid-pair --wireless-setup 192.168.1.42
+# Follow the prompts:
+#   1. Plug in USB cable → press Enter
+#   2. adroid runs `adb tcpip 5555` on the phone
+#   3. Unplug USB → press Enter
+#   4. adroid connects to 192.168.1.42:5555 over WiFi
+```
+
+Note: tcpip mode resets when the phone reboots. Re-run this command after a reboot.
+For Android 11+, prefer Option A — it survives reboots.
+
+#### Verify the phone is ready (any option)
+
+```bash
+adroid-pair --verify                  # auto-pick first device
+adroid-pair --verify 192.168.1.42:5555  # specific serial
+```
 
 ### Step 2: Start the runtime
 
@@ -157,8 +191,8 @@ to skip future prompts).
 adroid-start --bridge adb --port 7654
 ```
 
-The runtime prints a **starter agent token** (24h TTL, ACT scope on all 5
-tools). Copy it — you'll give it to your AI agent.
+The runtime prints a **bootstrap token** (30-day TTL, no grants — only
+used to request a pairing). Copy it — you'll give it to your AI agent.
 
 ### Step 3: Expose to the internet (so the agent can reach it)
 
@@ -177,30 +211,32 @@ You'll get a public URL like `https://random-name.trycloudflare.com`.
 ### Step 4: Open the dashboard
 
 Open `http://localhost:7654/ui` in your laptop browser. You'll see:
-- **Pending Approvals** panel — empty for now, will fill as the agent makes ACT-scope requests
+- **Pairing Requests & Active Sessions** panel — empty for now, will show the AI's pairing request when it arrives
 - **Agent Terminal** panel — shows every request, result, error in real time
-- **Latest Screenshot** panel — auto-refreshes when the agent captures one
+- Status pill at top: `idle` → `pairing` (yellow) → `connected` (green)
 
-### Step 5: Give the agent URL + token
+### Step 5: Give the agent URL + bootstrap token
 
 Tell your AI agent (e.g. paste into chat):
 
 > "Use Adroid runtime at `https://random-name.trycloudflare.com`.
-> Here's your token: `<paste token JSON>`.
-> Use POST /agent/call/async with `{token, tool, args}`.
-> For ACT-scope tools, you'll get back `approval_url` — share it with me
-> and I'll approve in my browser."
+> Here's the bootstrap token: `<paste bootstrap token JSON>`.
+> POST to `/agent/session/request` with `{bootstrap_token, agent_id}`.
+> You'll get back a `pairing_url` — share it with me and I'll approve.
+> Then poll `/agent/session/{pairing_id}` to get your session_token.
+> After that, call `/agent/call` freely until I disconnect."
 
 ### Step 6: Watch the magic
 
-When the agent calls `app.launch` (ACT scope):
-1. Agent POSTs → gets back `approval_url`
-2. Agent shares URL with you in chat
-3. You click URL → dashboard scrolls to highlighted pending card
-4. You tap **Approve** (or **Deny**)
-5. Agent polls → gets result → continues
+1. Agent POSTs `/agent/session/request` → gets `pairing_url`
+2. Agent shares the URL with you in chat
+3. You click URL → dashboard shows the pairing request with a TTL picker
+4. You pick TTL (1m, 5m, 1h, 6h, 24h, 7d, or custom) → tap **Approve & Connect**
+5. Agent polls → gets session_token → starts calling tools freely
+6. Every call shows up in the live terminal stream + signed audit log
+7. Click **Disconnect** on any session card to instantly revoke
 
-Every step is in the audit log + live terminal.
+No per-action approval. The AI has full access until TTL expires or you disconnect.
 
 ### Mode: Mock (no phone needed — for dev / demo)
 
