@@ -51,99 +51,163 @@ app.command("start")(start_cmd)
 
 
 @app.command("version")
-def version_cmd() -> None:
+def version_cmd(
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON (machine-readable)."),
+) -> None:
     """Show version + environment info."""
     import platform
     import shutil
 
     from adroid.cli.pair import adb_version
+    from adroid.cli.utils import print_stdout, set_json_mode
 
-    table = Table(show_header=False, box=None, padding=(0, 2))
-    table.add_column("key", style="dim", width=18)
-    table.add_column("value", style="white")
-    table.add_row("Adroid version", __version__)
-    table.add_row("Python", sys.version.split()[0])
-    table.add_row("Platform", platform.platform())
+    set_json_mode(json_output)
 
-    adb_v = adb_version()
-    table.add_row("adb", adb_v or "[red]not found[/red]")
+    # Get adb version safely (don't die if not found)
+    import shutil as _shutil
+    adb_path = _shutil.which("adb")
+    adb_v = None
+    if adb_path:
+        try:
+            import subprocess as _sp
+            proc = _sp.run([adb_path, "version"], capture_output=True, timeout=5, check=False)
+            if proc.returncode == 0 and proc.stdout:
+                adb_v = proc.stdout.decode("utf-8", "replace").splitlines()[0]
+        except Exception:
+            pass
 
-    # Check optional deps
-    def _check(mod: str, label: str) -> None:
+    def _check(mod: str) -> bool:
         try:
             __import__(mod)
-            table.add_row(label, "[green]installed[/green]")
+            return True
         except ImportError:
-            table.add_row(label, "[dim]not installed[/dim]")
+            return False
 
-    _check("fastapi", "extras: web")
-    _check("mcp", "extras: mcp")
+    data = {
+        "adroid_version": __version__,
+        "python": sys.version.split()[0],
+        "platform": platform.platform(),
+        "adb": adb_v or None,
+        "adb_path": adb_path,
+        "extras_web": _check("fastapi"),
+        "extras_mcp": _check("mcp"),
+    }
 
-    console.print(Panel(table, title="[bold blue]Adroid Environment[/bold blue]", border_style="blue", padding=(1, 2)))
+    if json_output:
+        print_stdout(data)
+        return
+
+    # Human-readable: compact table
+    table = Table(show_header=False, box=None, padding=(0, 1), width=60)
+    table.add_column("key", style="dim", width=14)
+    table.add_column("value", style="white")
+    table.add_row("Adroid", __version__)
+    table.add_row("Python", sys.version.split()[0])
+    table.add_row("Platform", platform.platform())
+    table.add_row("adb", adb_v or "[red]not found[/red]")
+    table.add_row("extras:web", "[green]yes[/green]" if data["extras_web"] else "[dim]no[/dim]")
+    table.add_row("extras:mcp", "[green]yes[/green]" if data["extras_mcp"] else "[dim]no[/dim]")
+
+    console.print(Panel(table, title="[bold blue]Adroid Version[/bold blue]", border_style="blue", padding=(0, 1), width=60))
 
 
 @app.command("doctor")
-def doctor_cmd() -> None:
-    """Diagnose environment + dependencies.
-
-    Checks:
-      - Python version (must be ≥3.10)
-      - adb binary availability
-      - Optional extras (web, mcp)
-      - Network reachability (Google DNS, for cloudflared/ngrok setup)
-    """
+def doctor_cmd(
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON (machine-readable)."),
+) -> None:
+    """Diagnose environment + dependencies."""
     import platform
     import socket
     import shutil
 
-    header("Adroid Doctor", "Running environment diagnostics…")
-    console.print()
+    from adroid.cli.pair import adb_version
+    from adroid.cli.utils import print_stdout, set_json_mode
 
-    # Python version
+    set_json_mode(json_output)
+
     py_version = sys.version_info
-    if py_version >= (3, 10):
-        success(f"Python {py_version.major}.{py_version.minor}.{py_version.micro} ✓")
-    else:
-        die(f"Python {py_version.major}.{py_version.minor} is too old. Need ≥3.10.")
+    py_ok = py_version >= (3, 10)
 
-    # adb
     adb_path = shutil.which("adb")
-    if adb_path:
-        success(f"adb binary: {adb_path}")
-    else:
-        warn("adb binary not found in PATH")
-        info("  Install with: sudo apt install adb  (Linux)")
-        info("               brew install android-tools  (macOS)")
+    adb_ok = adb_path is not None
 
-    # Optional extras
     try:
         import fastapi  # noqa: F401
-        success("extras [web]: installed")
+        web_ok = True
     except ImportError:
-        warn("extras [web]: not installed — run: pip install 'adroid[web]'")
+        web_ok = False
 
     try:
         import mcp  # noqa: F401
-        success("extras [mcp]: installed")
+        mcp_ok = True
     except ImportError:
-        info("extras [mcp]: not installed (optional, for MCP server mode)")
+        mcp_ok = False
 
-    # Network reachability
     try:
         socket.create_connection(("8.8.8.8", 53), timeout=3).close()
-        success("Network: can reach internet (good for cloudflared/ngrok)")
+        net_ok = True
     except OSError:
-        warn("Network: cannot reach 8.8.8.8 — check your connection")
+        net_ok = False
+
+    results = {
+        "python_ok": py_ok,
+        "python_version": f"{py_version.major}.{py_version.minor}.{py_version.micro}",
+        "adb_ok": adb_ok,
+        "adb_path": adb_path,
+        "extras_web": web_ok,
+        "extras_mcp": mcp_ok,
+        "network_ok": net_ok,
+        "all_ok": py_ok and adb_ok and web_ok and net_ok,
+    }
+
+    if json_output:
+        print_stdout(results)
+        return
+
+    # Human-readable: compact
+    from adroid.cli.utils import console, success, warn, info as _info
+    from rich.panel import Panel
 
     console.print()
-    console.print(Panel(
-        "[bold green]Diagnostics complete.[/bold green]\n\n"
-        "[dim]If everything above is green, you're ready to:[/dim]\n"
-        "  [cyan]adroid pair list[/cyan]   — see connected devices\n"
-        "  [cyan]adroid start[/cyan]       — boot the runtime",
-        border_style="green",
-        padding=(1, 2),
-    ))
+    if py_ok:
+        success(f"Python {py_version.major}.{py_version.minor}.{py_version.micro}")
+    else:
+        die(f"Python {py_version.major}.{py_version.minor} is too old. Need >=3.10.")
+
+    if adb_ok:
+        success(f"adb: {adb_path}")
+    else:
+        warn("adb not found in PATH")
+        _info("  Install: sudo apt install adb (Linux) / brew install android-tools (macOS)")
+
+    if web_ok:
+        success("extras [web]: installed")
+    else:
+        warn("extras [web]: not installed - pip install 'adroid[web]'")
+
+    if mcp_ok:
+        success("extras [mcp]: installed")
+    else:
+        _info("extras [mcp]: not installed (optional)")
+
+    if net_ok:
+        success("Network: can reach internet")
+    else:
+        warn("Network: cannot reach 8.8.8.8")
+
+    console.print()
+    if results["all_ok"]:
+        console.print(Panel(
+            "[green]All checks passed.[/green] Ready to run:\n"
+            "  [cyan]adroid pair list[/cyan]   - see devices\n"
+            "  [cyan]adroid start[/cyan]       - boot runtime",
+            border_style="green", padding=(0, 1), width=60,
+        ))
+    else:
+        console.print(Panel(
+            "[yellow]Some checks failed. Fix the warnings above.[/yellow]",
+            border_style="yellow", padding=(0, 1), width=60,
+        ))
 
 
 @app.callback()

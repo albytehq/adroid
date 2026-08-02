@@ -1,7 +1,36 @@
-"""Shared utilities for Adroid CLI commands."""
+"""Shared utilities for Adroid CLI commands.
+
+Design principles (research-based, per CLI Guidelines + Arcjet blog):
+
+1. **stdout = data, stderr = human-readable info.**
+   Machine-readable output (token JSON, audit events) goes to stdout
+   via `print_stdout()`. Human-readable panels/tables go to stderr via
+   `console` (Rich). This lets users pipe data:
+     TOKEN=$(adroid start --print-token)
+     adroid audit show --json | jq '.[] | .method'
+
+2. **Constrained panel width.**
+   Rich panels default to full terminal width. On wide monitors this
+   looks terrible and makes copy-paste harder. We cap at 100 chars
+   (industry standard for terminal readability, per CLI Guidelines).
+
+3. **--json flag support.**
+   Every command that returns data should support `--json` for
+   machine-readable output. This is the #1 recommendation from
+   "Designing CLIs for AI Agents" (Christian F. Jung, 2026).
+
+4. **--quiet / -q flag.**
+   Suppress non-essential output. Only show errors + final result.
+
+5. **No box-drawing chars on data output.**
+   Rich panels use `│`, `╭`, `╰` which break copy-paste. Data output
+   uses `print()` (raw, no formatting).
+"""
 
 from __future__ import annotations
 
+import json
+import os
 import shutil
 import subprocess
 import sys
@@ -12,33 +41,88 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 
-console = Console()
-err_console = Console(stderr=True, style="bold red")
+# ---------------------------------------------------------------------------
+# Console instances
+# ---------------------------------------------------------------------------
+
+# Human-readable console (stderr) — panels, tables, colors.
+# Width constrained to max 100 chars for readability (CLI Guidelines).
+_MAX_WIDTH = 100
+try:
+    _term_width = os.get_terminal_size().columns
+except (OSError, ValueError):
+    _term_width = 80
+_console_width = min(_term_width, _MAX_WIDTH)
+
+console = Console(width=_console_width)
+err_console = Console(stderr=True, style="bold red", width=_console_width)
+
+# Quiet mode flag — set by --quiet flag on commands
+_quiet_mode = False
+
+# JSON mode flag — set by --json flag on commands
+_json_mode = False
+
+
+def set_quiet(value: bool) -> None:
+    """Enable/disable quiet mode (suppress non-essential output)."""
+    global _quiet_mode
+    _quiet_mode = value
+
+
+def set_json_mode(value: bool) -> None:
+    """Enable/disable JSON output mode (machine-readable to stdout)."""
+    global _json_mode
+    _json_mode = value
+
+
+def is_json_mode() -> bool:
+    return _json_mode
 
 
 # ---------------------------------------------------------------------------
-# Console helpers
+# Data output (stdout — raw, no formatting, pipeable)
+# ---------------------------------------------------------------------------
+
+
+def print_stdout(data: str | dict | list) -> None:
+    """Print data to stdout. No Rich, no panels, no colors.
+
+    Use this for machine-readable output (token JSON, audit events, etc.).
+    Safe to pipe: `TOKEN=$(adroid start --print-token)` captures this.
+
+    If data is dict/list, it's JSON-serialized with indent=2.
+    """
+    if isinstance(data, (dict, list)):
+        print(json.dumps(data, indent=2, default=str))
+    else:
+        print(data)
+
+
+# ---------------------------------------------------------------------------
+# Human-readable output (stderr — Rich panels, colors)
 # ---------------------------------------------------------------------------
 
 
 def info(msg: str, **kwargs: Any) -> None:
-    """Print an informational message in blue."""
-    console.print(f"[blue]ℹ[/blue] {msg}", **kwargs)
+    """Print an informational message (suppressed in quiet mode)."""
+    if not _quiet_mode:
+        console.print(f"[blue]i[/blue] {msg}", **kwargs)
 
 
 def success(msg: str, **kwargs: Any) -> None:
     """Print a success message in green."""
-    console.print(f"[green]✓[/green] {msg}", **kwargs)
+    console.print(f"[green]v[/green] {msg}", **kwargs)
 
 
 def warn(msg: str, **kwargs: Any) -> None:
     """Print a warning message in yellow."""
-    console.print(f"[yellow]⚠[/yellow] {msg}", **kwargs)
+    console.print(f"[yellow]![/yellow] {msg}", **kwargs)
 
 
 def error(msg: str, **kwargs: Any) -> None:
     """Print an error message in red to stderr."""
-    err_console.print(f"✗ {msg}", **kwargs)
+    err_console.print(f"X {msg}", **kwargs)
 
 
 def die(msg: str, exit_code: int = 1) -> None:
@@ -48,7 +132,9 @@ def die(msg: str, exit_code: int = 1) -> None:
 
 
 def header(title: str, subtitle: str | None = None) -> None:
-    """Print a styled section header."""
+    """Print a styled section header (suppressed in quiet mode)."""
+    if _quiet_mode:
+        return
     body = f"[bold]{title}[/bold]"
     if subtitle:
         body += f"\n[dim]{subtitle}[/dim]"
