@@ -11,13 +11,12 @@ from __future__ import annotations
 
 import hashlib
 import threading
-from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from adroid.bridge.base import BlobStore
 from adroid.contract.errors import DeviceNotAvailableError
-from adroid.contract.types import AppInfo, DeviceId, DeviceInfo, DeviceState, Screenshot
+from adroid.contract.types import AppInfo, DeviceId, DeviceInfo, Screenshot
 
 
 @dataclass
@@ -80,7 +79,7 @@ class MockBridge:
             return list(self._devices[str(device_id)].apps)
 
     def capture_screenshot(self, device_id: DeviceId) -> Screenshot:
-        info = self._require(device_id)
+        self._require(device_id)
         # Generate a deterministic 1x1 PNG (red pixel) so tests have stable
         # hashes. Real screenshots will vary — this is just a mock.
         png = (
@@ -360,7 +359,6 @@ class MockBridge:
         condition: "WaitForCondition",
     ) -> "WaitForResult":
         """Mock ui_wait_for — always satisfied immediately (no real polling)."""
-        import time as _time
         from adroid.contract.ui import WaitForResult, WaitConditionType
 
         self._require(device_id)

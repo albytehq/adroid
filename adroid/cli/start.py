@@ -24,14 +24,12 @@ Usage:
 from __future__ import annotations
 
 import secrets
-import sys
 from pathlib import Path
 from typing import Optional
 
 import typer
 
 from adroid.cli.utils import (
-    console,
     die,
     print_stdout,
     set_json_mode,

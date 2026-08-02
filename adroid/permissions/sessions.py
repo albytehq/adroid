@@ -25,11 +25,10 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Iterable
 from uuid import UUID
 
-from adroid.contract.errors import AdroidError, PermissionDeniedError, RateLimitedError
-from adroid.contract.types import Capability, CapabilityToken, Scope
+from adroid.contract.errors import AdroidError, RateLimitedError
+from adroid.contract.types import Capability, Scope
 from adroid.permissions.tokens import TokenIssuer
 
 

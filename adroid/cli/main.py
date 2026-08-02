@@ -26,7 +26,7 @@ from adroid.cli.mcp import app as mcp_app
 from adroid.cli.pair import app as pair_app
 from adroid.cli.start import start_cmd
 from adroid.cli.token import app as token_app
-from adroid.cli.utils import console, die, header, info, success, warn
+from adroid.cli.utils import console, die, success, warn
 
 app = typer.Typer(
     name="adroid",
@@ -56,9 +56,7 @@ def version_cmd(
 ) -> None:
     """Show version + environment info."""
     import platform
-    import shutil
 
-    from adroid.cli.pair import adb_version
     from adroid.cli.utils import print_stdout, set_json_mode
 
     set_json_mode(json_output)
@@ -116,11 +114,9 @@ def doctor_cmd(
     json_output: bool = typer.Option(False, "--json", help="Output as JSON (machine-readable)."),
 ) -> None:
     """Diagnose environment + dependencies."""
-    import platform
     import socket
     import shutil
 
-    from adroid.cli.pair import adb_version
     from adroid.cli.utils import print_stdout, set_json_mode
 
     set_json_mode(json_output)
@@ -165,7 +161,7 @@ def doctor_cmd(
         return
 
     # Human-readable: compact
-    from adroid.cli.utils import console, success, warn, info as _info
+    from adroid.cli.utils import console, info as _info
     from rich.panel import Panel
 
     console.print()

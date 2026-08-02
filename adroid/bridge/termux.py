@@ -27,9 +27,7 @@ bridge for non-rooted input injection.
 
 from __future__ import annotations
 
-import hashlib
 import json
-import shutil
 import subprocess
 from typing import Any
 
@@ -181,7 +179,6 @@ class TermuxBridge:
         binary). The dump+tap flow is the same as AdbBridge.
         """
         import time
-        import xml.etree.ElementTree as ET
 
         self._require_match(device_id)
         start = time.monotonic()

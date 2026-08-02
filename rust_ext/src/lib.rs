@@ -4,7 +4,6 @@
 //! UI trees (1000+ nodes). Uses quick-xml's streaming API (StAX).
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use std::collections::HashMap;
@@ -197,38 +196,6 @@ fn clean_xml_declaration(xml: &str) -> String {
     xml.to_string()
 }
 
-/// Convert ParsedNode to Python dict.
-fn node_to_pydict<'py>(py: Python<'py>, node: &ParsedNode) -> PyResult<Bound<'py, PyDict>> {
-    let dict = PyDict::new_bound(py);
-    dict.set_item("uuid", &node.uuid)?;
-    dict.set_item("role", &node.role)?;
-    dict.set_item("text", &node.text)?;
-    dict.set_item("description", &node.description)?;
-    dict.set_item("resource_id", &node.resource_id)?;
-    dict.set_item("class_name", &node.class_name)?;
-    dict.set_item("package", &node.package)?;
-
-    let bounds_dict = PyDict::new_bound(py);
-    bounds_dict.set_item("x", node.bounds.0)?;
-    bounds_dict.set_item("y", node.bounds.1)?;
-    bounds_dict.set_item("w", node.bounds.2)?;
-    bounds_dict.set_item("h", node.bounds.3)?;
-    dict.set_item("bounds", bounds_dict)?;
-
-    dict.set_item("clickable", node.clickable)?;
-    dict.set_item("scrollable", node.scrollable)?;
-    dict.set_item("editable", node.role == "edit_text" && node.focusable)?;
-    dict.set_item("enabled", node.enabled)?;
-    dict.set_item("visible", true)?;
-    dict.set_item("focused", node.focused)?;
-    dict.set_item("selected", node.selected)?;
-    dict.set_item("parent_uuid", &node.parent_uuid)?;
-    dict.set_item("children_uuids", node.children_uuids.clone())?;
-    dict.set_item("confidence", 1.0f64)?;
-    dict.set_item("source", "a11y")?;
-    Ok(dict)
-}
-
 /// Parse uiautomator dump XML and return JSON string.
 /// This is faster than returning Python dicts because it avoids
 /// per-dict FFI overhead — only 1 FFI call for the entire result.
@@ -320,6 +287,7 @@ fn opt_to_json(s: &Option<String>) -> String {
 /// Parse a uiautomator bounds string into a dict {x, y, w, h}.
 #[pyfunction]
 fn parse_bounds_py(py: Python, bounds_str: &str) -> PyResult<Py<PyAny>> {
+    use pyo3::types::PyDict;
     let (x, y, w, h) = parse_bounds(bounds_str);
     let dict = PyDict::new_bound(py);
     dict.set_item("x", x)?;

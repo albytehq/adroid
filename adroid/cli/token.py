@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Optional
 
 import typer
 from rich.table import Table
 
-from adroid.cli.utils import die, header, info, success, warn, console
+from adroid.cli.utils import die, header, console
 
 app = typer.Typer(
     name="token",
@@ -86,7 +85,7 @@ def issue_cmd(
             die(f"Unknown capability: {cap_str} ({exc})")
         try:
             scope = Scope(scope_str.strip())
-        except ValueError as exc:
+        except ValueError:
             die(f"Unknown scope: {scope_str} (must be read|act|admin)")
         return CapabilityGrant(capability=cap, scope=scope)
 
@@ -125,7 +124,6 @@ def inspect_cmd(
 
     Useful for debugging — see what subject, grants, expiry a token has.
     """
-    import json
     from adroid.contract.types import CapabilityToken
 
     if token_json == "-":

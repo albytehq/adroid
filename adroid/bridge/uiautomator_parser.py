@@ -229,20 +229,27 @@ def _build_semantic_nodes_from_dicts(raw_nodes: list[dict]) -> list[SemanticNode
 
 def _parse_uiautomator_xml_python(xml_raw: str) -> list[SemanticNode]:
     """Python fallback parser (original implementation)."""
+    # Cleanup: uiautomator sometimes emits malformed XML declarations.
+    if "<?xml" in xml_raw:
+        end_decl = xml_raw.find("?>")
+        if end_decl > 0:
+            xml_raw = '<?xml version="1.0" encoding="UTF-8"?>' + xml_raw[end_decl + 2:]
 
     try:
         root = ET.fromstring(xml_raw)
     except ET.ParseError:
-        # Last resort: try without any declaration
+        # Try without any declaration
         if "<?xml" in xml_raw:
             end_decl = xml_raw.find("?>")
             if end_decl > 0:
-                xml_raw = xml_raw[end_decl + 2:]
-                root = ET.fromstring(xml_raw)
+                try:
+                    root = ET.fromstring(xml_raw[end_decl + 2:])
+                except ET.ParseError:
+                    return []  # Give up gracefully
             else:
-                raise
+                return []
         else:
-            raise
+            return []
 
     # The root is <hierarchy>, children are top-level <node>s
     nodes: list[SemanticNode] = []

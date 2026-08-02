@@ -28,7 +28,6 @@ future calls to the same app+action.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 from adroid.contract.ui import SemanticNode, Selector, WorldState
 from adroid.perception.confidence import (

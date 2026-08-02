@@ -33,26 +33,19 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ValidationError
 
-from adroid.bridge.mock import InMemoryBlobStore, MockBridge
 from adroid.contract.errors import AdroidError, PermissionDeniedError
 from adroid.contract.types import (
-    AppInfo,
-    AuditEvent,
-    AuditOutcome,
     Capability,
     CapabilityToken,
     DeviceId,
-    DeviceInfo,
     Scope,
-    Screenshot,
 )
 from adroid.permissions.sessions import SessionManager
 from adroid.permissions.tokens import TokenIssuer, validate_token_at

@@ -26,7 +26,6 @@ import hashlib
 import json
 import logging
 import secrets
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -34,7 +33,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
 )
-from pydantic import ValidationError
 
 from adroid.audit.writer import AuditReader, AuditWriter
 from adroid.bridge.base import BlobStore, DeviceBridge
@@ -43,7 +41,6 @@ from adroid.contract.errors import (
     AuditError,
     CapabilityNotFoundError,
     ContractError,
-    DeviceNotAvailableError,
 )
 from adroid.contract.types import (
     AppInfo,

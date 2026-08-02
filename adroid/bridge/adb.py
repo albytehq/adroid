@@ -22,15 +22,12 @@ import subprocess
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
-from typing import Any
 
 from adroid.bridge.base import BlobStore
 from adroid.bridge.uiautomator_parser import parse_uiautomator_xml
 from adroid.contract.errors import BridgeError, DeviceNotAvailableError
 from adroid.contract.types import AppInfo, DeviceId, DeviceInfo, DeviceState, Screenshot
 from adroid.contract.ui import (
-    Bounds,
-    NodeRole,
     SemanticNode,
     Selector,
     TapElementResult,
@@ -420,7 +417,6 @@ class AdbBridge:
 
         Returns {x, y, w, h} where (x, y) is top-left corner.
         """
-        import re
         m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds_str)
         if not m:
             return {"x": 0, "y": 0, "w": 0, "h": 0}
@@ -441,7 +437,6 @@ class AdbBridge:
     def ui_dump(self, device_id: DeviceId) -> WorldState:
         """Dump UI hierarchy via `uiautomator dump` → parse to WorldState."""
         serial = self._require_adb_serial(device_id)
-        start = time.monotonic()
 
         # 1. Run uiautomator dump to /sdcard, then cat it back
         dump_path = "/sdcard/adroid-ui-dump.xml"
@@ -485,7 +480,6 @@ class AdbBridge:
         # Cache it
         AdbBridge._worldstate_cache[serial] = (ws, time.monotonic())
 
-        duration_ms = int((time.monotonic() - start) * 1000)
         return ws
 
     def _get_cached_worldstate(self, serial: str, max_age: float | None = None) -> WorldState | None:
@@ -554,7 +548,7 @@ class AdbBridge:
         condition: WaitForCondition,
     ) -> WaitForResult:
         """Poll device until condition met or timeout."""
-        serial = self._require_adb_serial(device_id)
+        self._require_adb_serial(device_id)  # validate device
         start = time.monotonic()
         polls = 0
         last_revision: int | None = None

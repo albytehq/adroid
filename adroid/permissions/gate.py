@@ -16,9 +16,8 @@ from __future__ import annotations
 
 import threading
 import time
-from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 
 from adroid.contract.errors import PermissionDeniedError, RateLimitedError
 from adroid.contract.types import Capability, CapabilityToken, Scope

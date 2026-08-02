@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import typer
 
-from adroid.cli.utils import die, info, warn
+from adroid.cli.utils import die
 
 app = typer.Typer(
     name="mcp",

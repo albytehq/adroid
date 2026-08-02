@@ -30,7 +30,7 @@ from typing import Any
 from adroid.bridge.adb import AdbBridge, LocalBlobStore
 from adroid.bridge.mock import InMemoryBlobStore, MockBridge
 from adroid.contract.errors import AdroidError
-from adroid.contract.types import CapabilityToken, DeviceId, Scope
+from adroid.contract.types import CapabilityToken, DeviceId
 from adroid.runtime.core import AdroidRuntime
 
 log = logging.getLogger(__name__)
@@ -91,12 +91,11 @@ async def _serve(runtime: AdroidRuntime, token: CapabilityToken) -> None:
         from mcp.server import Server
         from mcp.server.stdio import stdio_server
         from mcp.types import (
-            CallToolResult,
             ImageContent,
             TextContent,
             Tool,
         )
-    except ImportError as exc:
+    except ImportError:
         sys.stderr.write(
             "mcp package not installed. Install with: pip install adroid[mcp]\n"
         )

@@ -22,11 +22,10 @@ PEM. v0.2.0 will move to a real KMS integration.
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
-from adroid.contract.types import Capability, CapabilityGrant, CapabilityToken, Scope
+from adroid.contract.types import Capability, CapabilityGrant, Scope
 from adroid.permissions.tokens import (
     load_private_key,
     load_public_key,

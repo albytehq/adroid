@@ -170,13 +170,10 @@ class AuditReader:
     def verify_all(self) -> Iterator[tuple[int, bool, str | None]]:
         """Yield (sequence, ok, error_message) for every line in the log.
 
-        Verification per line:
-            1. JSON parses.
-            2. payload validates as AuditEvent.
-            3. prev_hash matches the previous record's event_hash.
-            4. event_hash matches compute_event_hash(payload).
-            5. signature verifies against the public key.
+        If the log file doesn't exist, yields nothing (empty iterator).
         """
+        if not self._path.exists():
+            return
         prev_hash: str | None = None
         with open(self._path, "rb") as f:
             for raw in f:
@@ -224,10 +221,6 @@ class AuditReader:
     def tail(self, n: int = 10) -> list[AuditEvent]:
         """Return the last ``n`` verified events. Skips invalid lines."""
         events: list[AuditEvent] = []
-        for seq, ok, err in self.verify_all():
-            if ok:
-                # Re-parse for the typed value (we know it's valid)
-                pass
         # Simpler: just read raw, parse, return last n
         with open(self._path, "rb") as f:
             lines = [l for l in f.read().decode("utf-8").splitlines() if l.strip()]

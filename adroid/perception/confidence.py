@@ -28,7 +28,7 @@ The final confidence is: base_score + historical_adjustment, clamped [0, 1].
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 
 
