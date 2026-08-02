@@ -206,6 +206,17 @@ def _dispatch_tool(
         "device.screenshot": (Capability.DEVICE_SCREENSHOT, Scope.READ),
         "app.list": (Capability.APP_LIST, Scope.READ),
         "app.launch": (Capability.APP_LAUNCH, Scope.ACT),
+        # v0.1.0 input tools
+        "input.tap": (Capability.INPUT_TAP, Scope.ACT),
+        "input.tap_text": (Capability.INPUT_TAP_TEXT, Scope.ACT),
+        "input.swipe": (Capability.INPUT_SWIPE, Scope.ACT),
+        "input.text": (Capability.INPUT_TEXT, Scope.ACT),
+        "input.key": (Capability.INPUT_KEY, Scope.ACT),
+        # v0.1.0 shell + logs
+        "shell.exec": (Capability.SHELL_EXEC, Scope.ACT),
+        "logs.read": (Capability.LOGS_READ, Scope.READ),
+        # v0.1.0 permission meta-tool
+        "permission.request": (Capability.PERMISSION_REQUEST, Scope.READ),
     }
 
     if tool not in tool_map:
@@ -261,6 +272,90 @@ def _dispatch_tool(
         )
         terminal.append(kind="result", text=f"{tool} → ok")
         return {"launched": True}
+
+    # v0.1.0 input tools
+    if tool == "input.tap":
+        did = DeviceId.model_validate(args["device_id"])
+        state.runtime.tap(token=token, device_id=did, x=args["x"], y=args["y"])
+        terminal.append(kind="result", text=f"{tool} → ok ({args['x']},{args['y']})")
+        return {"tapped": True, "x": args["x"], "y": args["y"]}
+
+    if tool == "input.tap_text":
+        did = DeviceId.model_validate(args["device_id"])
+        result = state.runtime.tap_text(
+            token=token,
+            device_id=did,
+            text=args["text"],
+            match=args.get("match", "first"),
+            scroll_to_visible=args.get("scroll_to_visible", True),
+        )
+        terminal.append(
+            kind="result",
+            text=f"{tool} → ok (matched={result['matched_elements']}, scrolled={result['scrolled']})",
+        )
+        return result
+
+    if tool == "input.swipe":
+        did = DeviceId.model_validate(args["device_id"])
+        state.runtime.swipe(
+            token=token,
+            device_id=did,
+            x1=args["x1"], y1=args["y1"],
+            x2=args["x2"], y2=args["y2"],
+            duration_ms=args.get("duration_ms", 300),
+        )
+        terminal.append(kind="result", text=f"{tool} → ok")
+        return {"swiped": True}
+
+    if tool == "input.text":
+        did = DeviceId.model_validate(args["device_id"])
+        state.runtime.input_text(token=token, device_id=did, text=args["text"])
+        terminal.append(kind="result", text=f"{tool} → ok ({len(args['text'])} chars)")
+        return {"typed": True, "length": len(args["text"])}
+
+    if tool == "input.key":
+        did = DeviceId.model_validate(args["device_id"])
+        state.runtime.press_key(token=token, device_id=did, keycode=args["keycode"])
+        terminal.append(kind="result", text=f"{tool} → ok ({args['keycode']})")
+        return {"pressed": True, "keycode": args["keycode"]}
+
+    # v0.1.0 shell + logs
+    if tool == "shell.exec":
+        did = DeviceId.model_validate(args["device_id"])
+        result = state.runtime.run_shell(
+            token=token, device_id=did, command=args["command"],
+        )
+        terminal.append(
+            kind="result",
+            text=f"{tool} → ok (rc={result['returncode']}, {result['duration_ms']}ms, {len(result['stdout'])}B stdout)",
+        )
+        return result
+
+    if tool == "logs.read":
+        did = DeviceId.model_validate(args["device_id"])
+        result = state.runtime.read_logs(
+            token=token, device_id=did,
+            lines=args.get("lines", 100),
+            filter=args.get("filter"),
+        )
+        terminal.append(
+            kind="result",
+            text=f"{tool} → ok ({len(result['lines'])} lines, {result['total_bytes']}B)",
+        )
+        return result
+
+    # v0.1.0 permission meta-tool
+    if tool == "permission.request":
+        result = state.runtime.request_permission(
+            token=token,
+            scope=args["scope"],
+            reason=args.get("reason"),
+        )
+        terminal.append(
+            kind="result",
+            text=f"{tool} → ok (scope={args['scope']}, status={result['status']})",
+        )
+        return result
 
     raise HTTPException(status_code=500, detail="unreachable")
 

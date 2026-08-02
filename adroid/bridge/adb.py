@@ -153,9 +153,228 @@ class AdbBridge:
         serial = self._require_adb_serial(device_id)
         self._run_adb(["-s", serial, "shell", "input", "keyevent", keycode])
 
+    def tap_text(
+        self,
+        device_id: DeviceId,
+        text: str,
+        *,
+        match: str = "first",
+        scroll_to_visible: bool = True,
+    ) -> dict:
+        """Tap an element by visible text via UIAutomator dump.
+
+        Flow:
+            1. `uiautomator dump` → produces XML with all visible elements
+            2. Parse XML, find <node> elements with text= or content-desc= matching
+            3. If match not found and scroll_to_visible=True, swipe down and retry (up to 5x)
+            4. Tap the center of the matched element's bounds
+        """
+        import time
+        import xml.etree.ElementTree as ET
+
+        serial = self._require_adb_serial(device_id)
+        start = time.monotonic()
+        scrolled = False
+        attempts = 0
+        max_scroll_attempts = 5 if scroll_to_visible else 1
+
+        while attempts < max_scroll_attempts:
+            # Dump UI hierarchy to /sdcard, then pull it
+            dump_path = "/sdcard/adroid-ui-dump.xml"
+            self._run_adb(["-s", serial, "shell", "uiautomator", "dump", dump_path])
+            xml_raw = self._run_adb(["-s", serial, "shell", "cat", dump_path])
+            # Cleanup
+            try:
+                self._run_adb(["-s", serial, "shell", "rm", dump_path])
+            except BridgeError:
+                pass  # cleanup failure is non-fatal
+
+            # Parse and find matches
+            matches = self._find_elements_by_text(xml_raw, text)
+            if matches:
+                # Pick the right match
+                if match == "last":
+                    target = matches[-1]
+                elif match == "best":
+                    target = max(matches, key=lambda e: len(e.get("text", "")))
+                else:  # "first" (default)
+                    target = matches[0]
+
+                bounds = target["bounds"]
+                cx = (bounds["x"] + bounds["w"] // 2) + bounds["x"]
+                cy = (bounds["y"] + bounds["h"] // 2) + bounds["y"]
+                # Actually bounds in uiautomator XML is [x1,y1][x2,y2]
+                # We stored x,y,w,h — let's fix the center calc:
+                cx = bounds["x"] + bounds["w"] // 2
+                cy = bounds["y"] + bounds["h"] // 2
+
+                # Tap it
+                self.tap(device_id, cx, cy)
+
+                duration_ms = int((time.monotonic() - start) * 1000)
+                return {
+                    "matched_elements": len(matches),
+                    "tapped_element": {
+                        "text": target["text"],
+                        "bounds": bounds,
+                    },
+                    "scrolled": scrolled,
+                    "duration_ms": duration_ms,
+                }
+
+            # Not found — try scrolling
+            if scroll_to_visible and attempts < max_scroll_attempts - 1:
+                # Swipe from middle-bottom to middle-top (scroll down)
+                # Default to 1080x2400 if we don't know screen size
+                self._run_adb([
+                    "-s", serial, "shell", "input", "swipe",
+                    "540", "1800", "540", "600", "300"
+                ])
+                scrolled = True
+                time.sleep(0.5)  # let UI settle
+
+            attempts += 1
+
+        # No match found after all attempts
+        raise BridgeError(
+            f"no element found with text={text!r} after {attempts} attempt(s)",
+            code="adroid.bridge.tap_text_not_found",
+            details={"text": text, "match": match, "scrolled": scrolled},
+        )
+
+    def swipe(
+        self,
+        device_id: DeviceId,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        *,
+        duration_ms: int = 300,
+    ) -> None:
+        serial = self._require_adb_serial(device_id)
+        self._run_adb([
+            "-s", serial, "shell", "input", "swipe",
+            str(x1), str(y1), str(x2), str(y2), str(duration_ms),
+        ])
+
+    def run_shell(self, device_id: DeviceId, command: str) -> dict:
+        """Execute an allowlisted shell command via adb shell.
+
+        NOTE: The runtime layer must call AllowlistChecker.check() BEFORE
+        invoking this method. This implementation does NOT re-check —
+        defense in depth is the responsibility of the gate, not the bridge.
+        """
+        import time
+        serial = self._require_adb_serial(device_id)
+        start = time.monotonic()
+
+        # Use shell=True=False with explicit args; adb shell passes the
+        # rest as a single argument string to the device shell.
+        import subprocess
+        cmd = self._adb_cmd(["-s", serial, "shell", command])
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                timeout=self._timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise BridgeError(
+                f"shell command timed out: {command}",
+                code="adroid.bridge.shell_timeout",
+                details={"command": command},
+            ) from exc
+
+        duration_ms = int((time.monotonic() - start) * 1000)
+        return {
+            "stdout": proc.stdout.decode("utf-8", "replace"),
+            "stderr": proc.stderr.decode("utf-8", "replace"),
+            "returncode": proc.returncode,
+            "duration_ms": duration_ms,
+        }
+
+    def read_logs(
+        self,
+        device_id: DeviceId,
+        *,
+        lines: int = 100,
+        filter: str | None = None,
+    ) -> dict:
+        """Read recent logcat entries via `adb logcat -d`."""
+        serial = self._require_adb_serial(device_id)
+        # -d = dump and exit, -t N = last N lines
+        args = ["-s", serial, "shell", "logcat", "-d", "-t", str(lines)]
+        if filter:
+            args.extend(filter.split())
+
+        raw = self._run_adb(args)
+        all_lines = raw.splitlines()
+        # Cap at requested lines (logcat -t may return slightly more)
+        result_lines = all_lines[-lines:] if len(all_lines) > lines else all_lines
+        total_bytes = sum(len(l.encode("utf-8")) for l in result_lines)
+        return {
+            "lines": result_lines,
+            "truncated": len(all_lines) > lines,
+            "total_bytes": total_bytes,
+        }
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _find_elements_by_text(xml_raw: str, text: str) -> list[dict]:
+        """Parse uiautomator XML and find all elements whose text or
+        content-desc matches the given text exactly (case-sensitive).
+
+        Returns a list of dicts: {text, content_desc, bounds, class}
+        """
+        # uiautomator XML sometimes has encoding declaration that fails
+        # to parse; strip it
+        if "<?xml" in xml_raw:
+            # Keep the XML declaration but force UTF-8 encoding
+            end_decl = xml_raw.find("?>")
+            if end_decl > 0:
+                xml_raw = '<?xml version="1.0" encoding="UTF-8"?>' + xml_raw[end_decl + 2:]
+
+        try:
+            root = ET.fromstring(xml_raw)
+        except ET.ParseError as exc:
+            raise BridgeError(
+                f"failed to parse uiautomator dump: {exc}",
+                code="adroid.bridge.ui_dump_parse_error",
+                details={"xml_snippet": xml_raw[:500]},
+            ) from exc
+
+        matches: list[dict] = []
+        for node in root.iter("node"):
+            node_text = node.get("text", "")
+            node_desc = node.get("content-desc", "")
+            if text == node_text or text == node_desc:
+                bounds_str = node.get("bounds", "[0,0][0,0]")
+                bounds = AdbBridge._parse_bounds(bounds_str)
+                matches.append({
+                    "text": node_text or node_desc,
+                    "content_desc": node_desc,
+                    "bounds": bounds,
+                    "class": node.get("class", ""),
+                })
+        return matches
+
+    @staticmethod
+    def _parse_bounds(bounds_str: str) -> dict:
+        """Parse uiautomator bounds string '[x1,y1][x2,y2]' into dict.
+
+        Returns {x, y, w, h} where (x, y) is top-left corner.
+        """
+        import re
+        m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds_str)
+        if not m:
+            return {"x": 0, "y": 0, "w": 0, "h": 0}
+        x1, y1, x2, y2 = (int(g) for g in m.groups())
+        return {"x": x1, "y": y1, "w": x2 - x1, "h": y2 - y1}
 
     def _adb_cmd(self, args: list[str]) -> list[str]:
         cmd = [self._adb_path]

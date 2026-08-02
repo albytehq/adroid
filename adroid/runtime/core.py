@@ -176,12 +176,211 @@ APP_LAUNCH_SPEC = ToolSpec(
 )
 
 
+# ---------------------------------------------------------------------------
+# v0.1.0 input tools (TOUCH_CONTROL / KEYBOARD_INPUT scope)
+# ---------------------------------------------------------------------------
+
+
+INPUT_TAP_SPEC = ToolSpec(
+    name="input.tap",
+    capability=Capability.INPUT_TAP,
+    required_scope=Scope.ACT,
+    description="Inject a tap event at (x, y) device-pixel coordinates.",
+    args_schema={
+        "type": "object",
+        "required": ["device_id", "x", "y"],
+        "properties": {
+            "device_id": {"type": "object", "required": ["kind", "value"]},
+            "x": {"type": "integer", "minimum": 0, "maximum": 8192},
+            "y": {"type": "integer", "minimum": 0, "maximum": 8192},
+        },
+        "additionalProperties": False,
+    },
+    result_schema={"type": "object", "required": ["tapped"]},
+    stability="experimental",
+)
+
+INPUT_TAP_TEXT_SPEC = ToolSpec(
+    name="input.tap_text",
+    capability=Capability.INPUT_TAP_TEXT,
+    required_scope=Scope.ACT,
+    description="Tap an element by visible text (semantic). Dumps UI tree, finds match, taps center of bounds. Optionally scrolls to make element visible.",
+    args_schema={
+        "type": "object",
+        "required": ["device_id", "text"],
+        "properties": {
+            "device_id": {"type": "object", "required": ["kind", "value"]},
+            "text": {"type": "string", "minLength": 1, "maxLength": 512},
+            "match": {"type": "string", "enum": ["first", "last", "best"], "default": "first"},
+            "scroll_to_visible": {"type": "boolean", "default": True},
+        },
+        "additionalProperties": False,
+    },
+    result_schema={
+        "type": "object",
+        "required": ["matched_elements", "tapped_element", "scrolled", "duration_ms"],
+    },
+    stability="experimental",
+)
+
+INPUT_SWIPE_SPEC = ToolSpec(
+    name="input.swipe",
+    capability=Capability.INPUT_SWIPE,
+    required_scope=Scope.ACT,
+    description="Swipe gesture from (x1, y1) to (x2, y2) over duration_ms.",
+    args_schema={
+        "type": "object",
+        "required": ["device_id", "x1", "y1", "x2", "y2"],
+        "properties": {
+            "device_id": {"type": "object", "required": ["kind", "value"]},
+            "x1": {"type": "integer", "minimum": 0, "maximum": 8192},
+            "y1": {"type": "integer", "minimum": 0, "maximum": 8192},
+            "x2": {"type": "integer", "minimum": 0, "maximum": 8192},
+            "y2": {"type": "integer", "minimum": 0, "maximum": 8192},
+            "duration_ms": {"type": "integer", "minimum": 0, "maximum": 10000, "default": 300},
+        },
+        "additionalProperties": False,
+    },
+    result_schema={"type": "object", "required": ["swiped"]},
+    stability="experimental",
+)
+
+INPUT_TEXT_SPEC = ToolSpec(
+    name="input.text",
+    capability=Capability.INPUT_TEXT,
+    required_scope=Scope.ACT,
+    description="Type text into the currently focused field. Unicode-safe.",
+    args_schema={
+        "type": "object",
+        "required": ["device_id", "text"],
+        "properties": {
+            "device_id": {"type": "object", "required": ["kind", "value"]},
+            "text": {"type": "string", "minLength": 1, "maxLength": 4096},
+        },
+        "additionalProperties": False,
+    },
+    result_schema={"type": "object", "required": ["typed"]},
+    stability="experimental",
+)
+
+INPUT_KEY_SPEC = ToolSpec(
+    name="input.key",
+    capability=Capability.INPUT_KEY,
+    required_scope=Scope.ACT,
+    description="Press an Android keycode (e.g. 'KEYCODE_HOME', 'KEYCODE_BACK').",
+    args_schema={
+        "type": "object",
+        "required": ["device_id", "keycode"],
+        "properties": {
+            "device_id": {"type": "object", "required": ["kind", "value"]},
+            "keycode": {"type": "string", "minLength": 1, "maxLength": 64},
+        },
+        "additionalProperties": False,
+    },
+    result_schema={"type": "object", "required": ["pressed"]},
+    stability="experimental",
+)
+
+
+# ---------------------------------------------------------------------------
+# v0.1.0 shell + log tools (SHELL_EXEC / NOTIFICATIONS_READ scope)
+# ---------------------------------------------------------------------------
+
+
+SHELL_EXEC_SPEC = ToolSpec(
+    name="shell.exec",
+    capability=Capability.SHELL_EXEC,
+    required_scope=Scope.ACT,
+    description="Execute an allowlisted shell command on the device. Compound commands (; | & $() etc.) are rejected by default.",
+    args_schema={
+        "type": "object",
+        "required": ["device_id", "command"],
+        "properties": {
+            "device_id": {"type": "object", "required": ["kind", "value"]},
+            "command": {"type": "string", "minLength": 1, "maxLength": 4096},
+        },
+        "additionalProperties": False,
+    },
+    result_schema={
+        "type": "object",
+        "required": ["stdout", "stderr", "returncode", "duration_ms"],
+    },
+    stability="experimental",
+)
+
+LOGS_READ_SPEC = ToolSpec(
+    name="logs.read",
+    capability=Capability.LOGS_READ,
+    required_scope=Scope.READ,
+    description="Read recent logcat entries from the device.",
+    args_schema={
+        "type": "object",
+        "required": ["device_id"],
+        "properties": {
+            "device_id": {"type": "object", "required": ["kind", "value"]},
+            "lines": {"type": "integer", "minimum": 1, "maximum": 10000, "default": 100},
+            "filter": {"type": "string", "maxLength": 256, "default": None},
+        },
+        "additionalProperties": False,
+    },
+    result_schema={
+        "type": "object",
+        "required": ["lines", "truncated", "total_bytes"],
+    },
+    stability="experimental",
+)
+
+
+# ---------------------------------------------------------------------------
+# v0.1.0 permission meta-tool
+# ---------------------------------------------------------------------------
+
+
+PERMISSION_REQUEST_SPEC = ToolSpec(
+    name="permission.request",
+    capability=Capability.PERMISSION_REQUEST,
+    required_scope=Scope.READ,
+    description="Request an additional permission scope for the current session. Returns the request_id which the human must approve via the dashboard.",
+    args_schema={
+        "type": "object",
+        "required": ["scope"],
+        "properties": {
+            "scope": {
+                "type": "string",
+                "enum": ["observe", "screen_read", "touch_control", "keyboard_input",
+                         "shell_exec", "notifications_read", "ui_inspect"],
+            },
+            "reason": {"type": "string", "maxLength": 512},
+        },
+        "additionalProperties": False,
+    },
+    result_schema={
+        "type": "object",
+        "required": ["request_id", "status"],
+    },
+    stability="experimental",
+)
+
+
 _V0_TOOLS: list[ToolSpec] = [
+    # Device observation
     DEVICE_LIST_SPEC,
     DEVICE_OBSERVE_SPEC,
     DEVICE_SCREENSHOT_SPEC,
+    # App lifecycle
     APP_LIST_SPEC,
     APP_LAUNCH_SPEC,
+    # Input injection
+    INPUT_TAP_SPEC,
+    INPUT_TAP_TEXT_SPEC,
+    INPUT_SWIPE_SPEC,
+    INPUT_TEXT_SPEC,
+    INPUT_KEY_SPEC,
+    # Shell + logs
+    SHELL_EXEC_SPEC,
+    LOGS_READ_SPEC,
+    # Permission meta-tool
+    PERMISSION_REQUEST_SPEC,
 ]
 
 
@@ -381,6 +580,200 @@ class AdroidRuntime:
             self._audit_call(token, spec, outcome=AuditOutcome.ERROR, error_code="adroid.unexpected", args=args, device_id=device_id, error=str(exc))
             raise ContractError(f"unexpected bridge error: {exc}", code="adroid.unexpected") from exc
         self._audit_call(token, spec, outcome=AuditOutcome.SUCCESS, args=args, device_id=device_id)
+
+    # ------------------------------------------------------------------
+    # v0.1.0 input tools
+    # ------------------------------------------------------------------
+
+    def tap(self, *, token: CapabilityToken, device_id: DeviceId, x: int, y: int) -> None:
+        spec = self._require_tool("input.tap")
+        self._gate.authorize(token, spec.capability, spec.required_scope)
+        args = {"device_id": str(device_id), "x": x, "y": y}
+        try:
+            self._bridge.tap(device_id, x, y)
+        except AdroidError as exc:
+            self._audit_call(token, spec, outcome=AuditOutcome.ERROR, error_code=exc.code, args=args, device_id=device_id)
+            raise
+        except Exception as exc:
+            self._audit_call(token, spec, outcome=AuditOutcome.ERROR, error_code="adroid.unexpected", args=args, device_id=device_id, error=str(exc))
+            raise ContractError(f"unexpected bridge error: {exc}", code="adroid.unexpected") from exc
+        self._audit_call(token, spec, outcome=AuditOutcome.SUCCESS, args=args, device_id=device_id)
+
+    def tap_text(
+        self,
+        *,
+        token: CapabilityToken,
+        device_id: DeviceId,
+        text: str,
+        match: str = "first",
+        scroll_to_visible: bool = True,
+    ) -> dict:
+        spec = self._require_tool("input.tap_text")
+        self._gate.authorize(token, spec.capability, spec.required_scope)
+        args = {"device_id": str(device_id), "text": text, "match": match, "scroll_to_visible": scroll_to_visible}
+        try:
+            result = self._bridge.tap_text(device_id, text, match=match, scroll_to_visible=scroll_to_visible)
+        except AdroidError as exc:
+            self._audit_call(token, spec, outcome=AuditOutcome.ERROR, error_code=exc.code, args=args, device_id=device_id)
+            raise
+        except Exception as exc:
+            self._audit_call(token, spec, outcome=AuditOutcome.ERROR, error_code="adroid.unexpected", args=args, device_id=device_id, error=str(exc))
+            raise ContractError(f"unexpected bridge error: {exc}", code="adroid.unexpected") from exc
+        self._audit_call(token, spec, outcome=AuditOutcome.SUCCESS, args=args, device_id=device_id, extra_metadata={"matched": result.get("matched_elements", 0)})
+        return result
+
+    def swipe(
+        self,
+        *,
+        token: CapabilityToken,
+        device_id: DeviceId,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        duration_ms: int = 300,
+    ) -> None:
+        spec = self._require_tool("input.swipe")
+        self._gate.authorize(token, spec.capability, spec.required_scope)
+        args = {"device_id": str(device_id), "x1": x1, "y1": y1, "x2": x2, "y2": y2, "duration_ms": duration_ms}
+        try:
+            self._bridge.swipe(device_id, x1, y1, x2, y2, duration_ms=duration_ms)
+        except AdroidError as exc:
+            self._audit_call(token, spec, outcome=AuditOutcome.ERROR, error_code=exc.code, args=args, device_id=device_id)
+            raise
+        except Exception as exc:
+            self._audit_call(token, spec, outcome=AuditOutcome.ERROR, error_code="adroid.unexpected", args=args, device_id=device_id, error=str(exc))
+            raise ContractError(f"unexpected bridge error: {exc}", code="adroid.unexpected") from exc
+        self._audit_call(token, spec, outcome=AuditOutcome.SUCCESS, args=args, device_id=device_id)
+
+    def input_text(self, *, token: CapabilityToken, device_id: DeviceId, text: str) -> None:
+        spec = self._require_tool("input.text")
+        self._gate.authorize(token, spec.capability, spec.required_scope)
+        args = {"device_id": str(device_id), "text_length": len(text)}
+        try:
+            self._bridge.input_text(device_id, text)
+        except AdroidError as exc:
+            self._audit_call(token, spec, outcome=AuditOutcome.ERROR, error_code=exc.code, args=args, device_id=device_id)
+            raise
+        except Exception as exc:
+            self._audit_call(token, spec, outcome=AuditOutcome.ERROR, error_code="adroid.unexpected", args=args, device_id=device_id, error=str(exc))
+            raise ContractError(f"unexpected bridge error: {exc}", code="adroid.unexpected") from exc
+        self._audit_call(token, spec, outcome=AuditOutcome.SUCCESS, args=args, device_id=device_id)
+
+    def press_key(self, *, token: CapabilityToken, device_id: DeviceId, keycode: str) -> None:
+        spec = self._require_tool("input.key")
+        self._gate.authorize(token, spec.capability, spec.required_scope)
+        args = {"device_id": str(device_id), "keycode": keycode}
+        try:
+            self._bridge.press_key(device_id, keycode)
+        except AdroidError as exc:
+            self._audit_call(token, spec, outcome=AuditOutcome.ERROR, error_code=exc.code, args=args, device_id=device_id)
+            raise
+        except Exception as exc:
+            self._audit_call(token, spec, outcome=AuditOutcome.ERROR, error_code="adroid.unexpected", args=args, device_id=device_id, error=str(exc))
+            raise ContractError(f"unexpected bridge error: {exc}", code="adroid.unexpected") from exc
+        self._audit_call(token, spec, outcome=AuditOutcome.SUCCESS, args=args, device_id=device_id)
+
+    # ------------------------------------------------------------------
+    # v0.1.0 shell + log tools
+    # ------------------------------------------------------------------
+
+    def run_shell(
+        self,
+        *,
+        token: CapabilityToken,
+        device_id: DeviceId,
+        command: str,
+        allowlist_checker=None,
+    ) -> dict:
+        """Execute an allowlisted shell command.
+
+        The allowlist_checker is optional — if None, uses the default
+        AllowlistChecker. The runtime layer does NOT bypass the allowlist;
+        it always checks before delegating to the bridge.
+        """
+        spec = self._require_tool("shell.exec")
+        self._gate.authorize(token, spec.capability, spec.required_scope)
+        args = {"device_id": str(device_id), "command": command}
+
+        # Allowlist check (defense in depth)
+        if allowlist_checker is None:
+            from adroid.permissions.allowlist import get_default_checker
+            allowlist_checker = get_default_checker()
+        decision = allowlist_checker.check(command)
+        if not decision.allowed:
+            err = ContractError(
+                f"shell command rejected by allowlist: {decision.reason}",
+                code="adroid.shell.not_allowed",
+                details={
+                    "command": command,
+                    "reason": decision.reason,
+                },
+            )
+            self._audit_call(token, spec, outcome=AuditOutcome.DENIED, error_code=err.code, args=args, device_id=device_id)
+            raise err
+
+        try:
+            result = self._bridge.run_shell(device_id, command)
+        except AdroidError as exc:
+            self._audit_call(token, spec, outcome=AuditOutcome.ERROR, error_code=exc.code, args=args, device_id=device_id)
+            raise
+        except Exception as exc:
+            self._audit_call(token, spec, outcome=AuditOutcome.ERROR, error_code="adroid.unexpected", args=args, device_id=device_id, error=str(exc))
+            raise ContractError(f"unexpected bridge error: {exc}", code="adroid.unexpected") from exc
+        self._audit_call(token, spec, outcome=AuditOutcome.SUCCESS, args=args, device_id=device_id, extra_metadata={"returncode": result.get("returncode")})
+        return result
+
+    def read_logs(
+        self,
+        *,
+        token: CapabilityToken,
+        device_id: DeviceId,
+        lines: int = 100,
+        filter: str | None = None,
+    ) -> dict:
+        spec = self._require_tool("logs.read")
+        self._gate.authorize(token, spec.capability, spec.required_scope)
+        args = {"device_id": str(device_id), "lines": lines, "filter": filter}
+        try:
+            result = self._bridge.read_logs(device_id, lines=lines, filter=filter)
+        except AdroidError as exc:
+            self._audit_call(token, spec, outcome=AuditOutcome.ERROR, error_code=exc.code, args=args, device_id=device_id)
+            raise
+        except Exception as exc:
+            self._audit_call(token, spec, outcome=AuditOutcome.ERROR, error_code="adroid.unexpected", args=args, device_id=device_id, error=str(exc))
+            raise ContractError(f"unexpected bridge error: {exc}", code="adroid.unexpected") from exc
+        self._audit_call(token, spec, outcome=AuditOutcome.SUCCESS, args=args, device_id=device_id, extra_metadata={"lines_returned": len(result.get("lines", []))})
+        return result
+
+    def request_permission(
+        self,
+        *,
+        token: CapabilityToken,
+        scope: str,
+        reason: str | None = None,
+    ) -> dict:
+        """Meta-tool: request an additional permission scope.
+
+        v0.1.0 behavior: returns a request_id and a status of "granted"
+        (since session pairing already grants ALL scopes). v0.2.0+ will
+        implement actual per-scope approval flow.
+        """
+        spec = self._require_tool("permission.request")
+        self._gate.authorize(token, spec.capability, spec.required_scope)
+        args = {"scope": scope, "reason": reason}
+
+        # v0.1.0: session pairing grants all scopes, so all requests are auto-granted
+        import uuid
+        request_id = str(uuid.uuid4())
+        result = {
+            "request_id": request_id,
+            "status": "granted",  # v0.1.0: always granted (session has full access)
+            "scope": scope,
+            "note": "v0.1.0: session pairing grants all scopes. v0.2.0+ will require explicit per-scope approval.",
+        }
+        self._audit_call(token, spec, outcome=AuditOutcome.SUCCESS, args=args, extra_metadata={"scope": scope, "granted": True})
+        return result
 
     def get_blob(self, blob_ref: str) -> bytes | None:
         """Resolve a content-addressed reference to its bytes.

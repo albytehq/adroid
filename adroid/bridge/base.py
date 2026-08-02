@@ -5,9 +5,9 @@ runtime only ever talks to ``DeviceBridge``; the actual driver (ADB,
 UIAutomator, accessibility service, Termux helper, future drivers that
 don't exist yet) is a swappable detail.
 
-v0.1.0 ships only ``adb`` and ``mock`` implementations. v0.2.0 will add
-``emulator`` (qemu control surface) and v0.3.0 will add ``remote``
-(grpc-based for cross-network bridges).
+v0.1.0 ships ``adb``, ``mock``, and ``termux`` implementations. v0.2.0
+will add ``emulator`` (qemu control surface) and v0.3.0 will add
+``remote`` (grpc-based for cross-network bridges).
 """
 
 from __future__ import annotations
@@ -31,6 +31,10 @@ class DeviceBridge(Protocol):
           strings) into the return value. Wrap them in ``BridgeError.details``.
     """
 
+    # ------------------------------------------------------------------
+    # Device observation (READ scope)
+    # ------------------------------------------------------------------
+
     def list_devices(self) -> list[DeviceInfo]:
         """Return a snapshot of every device the bridge can see."""
         ...
@@ -48,6 +52,10 @@ class DeviceBridge(Protocol):
         (sha256). Bytes are stored via the runtime's BlobStore, NOT here."""
         ...
 
+    # ------------------------------------------------------------------
+    # App lifecycle (TOUCH_CONTROL scope)
+    # ------------------------------------------------------------------
+
     def launch_app(self, device_id: DeviceId, package_name: str) -> None:
         """Launch an app by package name."""
         ...
@@ -56,8 +64,51 @@ class DeviceBridge(Protocol):
         """Force-stop an app by package name."""
         ...
 
+    # ------------------------------------------------------------------
+    # Input injection (TOUCH_CONTROL / KEYBOARD_INPUT scope)
+    # ------------------------------------------------------------------
+
     def tap(self, device_id: DeviceId, x: int, y: int) -> None:
         """Inject a tap event at (x, y). Coordinates are device pixels."""
+        ...
+
+    def tap_text(
+        self,
+        device_id: DeviceId,
+        text: str,
+        *,
+        match: str = "first",
+        scroll_to_visible: bool = True,
+    ) -> dict:
+        """Tap an element by visible text (semantic tap).
+
+        Dumps the UI tree, finds an element whose text/content-desc matches,
+        optionally scrolls to make it visible, then taps the center of its
+        bounding box.
+
+        Args:
+            text: The text to match (case-sensitive exact match).
+            match: "first" (default), "last", or "best" (longest match).
+            scroll_to_visible: If True, scroll down until element is found
+                or 5 scroll attempts fail.
+
+        Returns:
+            Dict with keys: matched_elements, tapped_element {text, bounds},
+            scrolled (bool), duration_ms.
+        """
+        ...
+
+    def swipe(
+        self,
+        device_id: DeviceId,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        *,
+        duration_ms: int = 300,
+    ) -> None:
+        """Swipe gesture from (x1, y1) to (x2, y2) over duration_ms."""
         ...
 
     def input_text(self, device_id: DeviceId, text: str) -> None:
@@ -66,6 +117,45 @@ class DeviceBridge(Protocol):
 
     def press_key(self, device_id: DeviceId, keycode: str) -> None:
         """Press an Android keycode (e.g. 'KEYCODE_HOME')."""
+        ...
+
+    # ------------------------------------------------------------------
+    # Shell execution (SHELL_EXEC scope — allowlisted)
+    # ------------------------------------------------------------------
+
+    def run_shell(self, device_id: DeviceId, command: str) -> dict:
+        """Execute an allowlisted shell command.
+
+        The runtime's allowlist module must approve the command before
+        this is called. Implementations should still log the command
+        verbatim into the audit trail.
+
+        Returns:
+            Dict with: stdout (str), stderr (str), returncode (int),
+            duration_ms (int).
+        """
+        ...
+
+    # ------------------------------------------------------------------
+    # Log observation (NOTIFICATIONS_READ scope)
+    # ------------------------------------------------------------------
+
+    def read_logs(
+        self,
+        device_id: DeviceId,
+        *,
+        lines: int = 100,
+        filter: str | None = None,
+    ) -> dict:
+        """Read recent logcat entries.
+
+        Args:
+            lines: Number of recent lines to return (default 100).
+            filter: Optional tag filter (e.g. "ActivityManager:I *:S").
+
+        Returns:
+            Dict with: lines (list[str]), truncated (bool), total_bytes (int).
+        """
         ...
 
 

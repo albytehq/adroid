@@ -49,8 +49,19 @@ class Capability(str, Enum):
 
     # Input injection (write-side — requires elevated scope)
     INPUT_TAP = "input.tap"
+    INPUT_TAP_TEXT = "input.tap_text"
+    INPUT_SWIPE = "input.swipe"
     INPUT_TEXT = "input.text"
     INPUT_KEY = "input.key"
+
+    # Shell execution (allowlisted — see adroid.permissions.allowlist)
+    SHELL_EXEC = "shell.exec"
+
+    # Log observation (read-only)
+    LOGS_READ = "logs.read"
+
+    # Permission meta-tool (request a new scope mid-session)
+    PERMISSION_REQUEST = "permission.request"
 
     # Filesystem (sandboxed to package dirs)
     FS_READ = "fs.read"
@@ -58,6 +69,50 @@ class Capability(str, Enum):
 
     # Network observation (read-only)
     NET_OBSERVE = "net.observe"
+
+
+class PermissionScope(str, Enum):
+    """Permission scope taxonomy matching the v0.1.0 roadmap spec (Table 5.2).
+
+    Each tool maps to exactly one permission scope. The bootstrap flow
+    grants ALL scopes at ACT tier. Future versions (v1.0.0 RBAC) will
+    allow per-scope delegation.
+
+    These are stable strings — AI agents may branch on them. Do NOT
+    rename without a major version bump.
+    """
+
+    NONE = "none"
+    OBSERVE = "observe"
+    SCREEN_READ = "screen_read"
+    TOUCH_CONTROL = "touch_control"
+    KEYBOARD_INPUT = "keyboard_input"
+    SHELL_EXEC = "shell_exec"
+    NOTIFICATIONS_READ = "notifications_read"
+    UI_INSPECT = "ui_inspect"
+
+
+# Mapping: Capability → required PermissionScope
+# This is the source of truth for the spec's "Permission Scope" column.
+CAPABILITY_TO_SCOPE: dict[Capability, PermissionScope] = {
+    Capability.DEVICE_LIST: PermissionScope.NONE,
+    Capability.DEVICE_OBSERVE: PermissionScope.OBSERVE,
+    Capability.DEVICE_SCREENSHOT: PermissionScope.SCREEN_READ,
+    Capability.APP_LIST: PermissionScope.NONE,
+    Capability.APP_LAUNCH: PermissionScope.TOUCH_CONTROL,
+    Capability.APP_FORCE_STOP: PermissionScope.TOUCH_CONTROL,
+    Capability.INPUT_TAP: PermissionScope.TOUCH_CONTROL,
+    Capability.INPUT_TAP_TEXT: PermissionScope.TOUCH_CONTROL,
+    Capability.INPUT_SWIPE: PermissionScope.TOUCH_CONTROL,
+    Capability.INPUT_TEXT: PermissionScope.KEYBOARD_INPUT,
+    Capability.INPUT_KEY: PermissionScope.TOUCH_CONTROL,
+    Capability.SHELL_EXEC: PermissionScope.SHELL_EXEC,
+    Capability.LOGS_READ: PermissionScope.NOTIFICATIONS_READ,
+    Capability.PERMISSION_REQUEST: PermissionScope.NONE,
+    Capability.FS_READ: PermissionScope.SHELL_EXEC,
+    Capability.FS_WRITE: PermissionScope.SHELL_EXEC,
+    Capability.NET_OBSERVE: PermissionScope.OBSERVE,
+}
 
 
 class Scope(str, Enum):

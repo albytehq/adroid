@@ -167,6 +167,170 @@ class TermuxBridge:
         self._require_match(device_id)
         self._run(["input", "keyevent", keycode])
 
+    def tap_text(
+        self,
+        device_id: DeviceId,
+        text: str,
+        *,
+        match: str = "first",
+        scroll_to_visible: bool = True,
+    ) -> dict:
+        """Tap an element by visible text. Uses uiautomator dump.
+
+        In Termux, `uiautomator` is available without root (it's a system
+        binary). The dump+tap flow is the same as AdbBridge.
+        """
+        import time
+        import xml.etree.ElementTree as ET
+
+        self._require_match(device_id)
+        start = time.monotonic()
+        scrolled = False
+        attempts = 0
+        max_scroll_attempts = 5 if scroll_to_visible else 1
+
+        while attempts < max_scroll_attempts:
+            dump_path = "/sdcard/adroid-ui-dump.xml"
+            self._run(["uiautomator", "dump", dump_path])
+            # Read the file directly (Termux can access /sdcard with permission)
+            try:
+                with open(dump_path, "r", encoding="utf-8") as f:
+                    xml_raw = f.read()
+            except OSError as exc:
+                raise BridgeError(
+                    f"failed to read uiautomator dump: {exc}",
+                    code="adroid.bridge.termux.ui_dump_read_error",
+                ) from exc
+            finally:
+                try:
+                    self._run(["rm", dump_path])
+                except BridgeError:
+                    pass
+
+            # Parse and find matches (re-use AdbBridge's static helpers)
+            from adroid.bridge.adb import AdbBridge
+            matches = AdbBridge._find_elements_by_text(xml_raw, text)
+            if matches:
+                if match == "last":
+                    target = matches[-1]
+                elif match == "best":
+                    target = max(matches, key=lambda e: len(e.get("text", "")))
+                else:
+                    target = matches[0]
+
+                bounds = target["bounds"]
+                cx = bounds["x"] + bounds["w"] // 2
+                cy = bounds["y"] + bounds["h"] // 2
+                self.tap(device_id, cx, cy)
+
+                duration_ms = int((time.monotonic() - start) * 1000)
+                return {
+                    "matched_elements": len(matches),
+                    "tapped_element": {"text": target["text"], "bounds": bounds},
+                    "scrolled": scrolled,
+                    "duration_ms": duration_ms,
+                }
+
+            if scroll_to_visible and attempts < max_scroll_attempts - 1:
+                self._run(["input", "swipe", "540", "1800", "540", "600", "300"])
+                scrolled = True
+                time.sleep(0.5)
+
+            attempts += 1
+
+        raise BridgeError(
+            f"no element found with text={text!r} after {attempts} attempt(s)",
+            code="adroid.bridge.termux.tap_text_not_found",
+            details={"text": text, "match": match, "scrolled": scrolled},
+        )
+
+    def swipe(
+        self,
+        device_id: DeviceId,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        *,
+        duration_ms: int = 300,
+    ) -> None:
+        self._require_match(device_id)
+        self._run([
+            "input", "swipe",
+            str(x1), str(y1), str(x2), str(y2), str(duration_ms),
+        ])
+
+    def run_shell(self, device_id: DeviceId, command: str) -> dict:
+        """Execute an allowlisted shell command. We're already ON the device
+        in Termux mode, so just run the command directly via subprocess."""
+        import subprocess
+        import time
+        self._require_match(device_id)
+        start = time.monotonic()
+        try:
+            proc = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                timeout=self._timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise BridgeError(
+                f"shell command timed out: {command}",
+                code="adroid.bridge.termux.shell_timeout",
+                details={"command": command},
+            ) from exc
+
+        duration_ms = int((time.monotonic() - start) * 1000)
+        return {
+            "stdout": proc.stdout.decode("utf-8", "replace"),
+            "stderr": proc.stderr.decode("utf-8", "replace"),
+            "returncode": proc.returncode,
+            "duration_ms": duration_ms,
+        }
+
+    def read_logs(
+        self,
+        device_id: DeviceId,
+        *,
+        lines: int = 100,
+        filter: str | None = None,
+    ) -> dict:
+        """Read logcat directly (we're on the device in Termux mode)."""
+        import subprocess
+        self._require_match(device_id)
+        args = ["logcat", "-d", "-t", str(lines)]
+        if filter:
+            args.extend(filter.split())
+
+        try:
+            proc = subprocess.run(
+                args,
+                capture_output=True,
+                timeout=self._timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise BridgeError(
+                "logcat timed out",
+                code="adroid.bridge.termux.logcat_timeout",
+            ) from exc
+        except FileNotFoundError as exc:
+            raise BridgeError(
+                "logcat binary not found (not running on Android?)",
+                code="adroid.bridge.termux.logcat_missing",
+            ) from exc
+
+        raw = proc.stdout.decode("utf-8", "replace")
+        all_lines = raw.splitlines()
+        result_lines = all_lines[-lines:] if len(all_lines) > lines else all_lines
+        return {
+            "lines": result_lines,
+            "truncated": len(all_lines) > lines,
+            "total_bytes": sum(len(l.encode("utf-8")) for l in result_lines),
+        }
+
     # ------------------------------------------------------------------
     # Termux-specific extras (not part of DeviceBridge Protocol)
     # ------------------------------------------------------------------

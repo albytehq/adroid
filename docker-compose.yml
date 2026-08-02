@@ -1,0 +1,75 @@
+# Adroid Runtime — Docker Compose
+#
+# Single-node deployment matching the v0.1.0 release criteria.
+#
+# Usage:
+#   docker compose up -d
+#   docker compose logs -f
+#   docker compose down
+#
+# The runtime exposes port 7654. Put a reverse proxy (nginx, Caddy,
+# Traefik) in front for TLS termination.
+#
+# For ADB access to a USB-connected phone, you need to forward the USB
+# device to the container. On Linux, the easiest way is to run adb in
+# host network mode and connect to it:
+#
+#   # On host:
+#   adb -a -P 5037 nodaemon server
+#
+#   # In docker-compose.yml, add:
+#   #   network_mode: host
+#   #   environment:
+#   #     - ADB_SERVER_SOCKET=tcp:host.docker.internal:5037
+#
+# For wireless ADB (Android 11+), no special setup needed — just pair
+# from inside the container or pass the device IP.
+
+services:
+  adroid:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: adroid:latest
+    container_name: adroid-runtime
+    restart: unless-stopped
+    ports:
+      - "7654:7654"
+    volumes:
+      # Persistent audit log + blob store
+      - ./data:/data
+      # Optional: custom allowlist config
+      # - ./allowlist.json:/data/allowlist.json:ro
+    environment:
+      - ADROID_LOG_LEVEL=INFO
+      # Uncomment to use a host adb server (for USB device access)
+      # - ADB_SERVER_SOCKET=tcp:host.docker.internal:5037
+      # - ANDROID_ADB_SERVER_PORT=5037
+    # Uncomment for USB device access via host adb server
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7654/api/tools', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Optional: cloudflared tunnel for internet exposure
+  # Uncomment + set TUNNEL_TOKEN to expose the runtime to the internet
+  # cloudflared:
+  #   image: cloudflare/cloudflared:latest
+  #   container_name: adroid-tunnel
+  #   restart: unless-stopped
+  #   command: tunnel --no-autoupdate run
+  #   environment:
+  #     - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+  #   depends_on:
+  #     - adroid
+
+# Volumes are bind-mounted to ./data on the host for easy inspection

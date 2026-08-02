@@ -24,6 +24,10 @@ class _MockDevice:
     info: DeviceInfo
     apps: list[AppInfo]
     last_screenshot: bytes | None = None
+    last_tap: tuple[int, int] | None = None
+    last_swipe: tuple | None = None
+    last_text: str | None = None
+    last_key: str | None = None
 
 
 class MockBridge:
@@ -101,12 +105,109 @@ class MockBridge:
 
     def tap(self, device_id: DeviceId, x: int, y: int) -> None:
         self._require(device_id)
+        # Record the tap in mock state (for testing)
+        with self._lock:
+            d = self._devices[str(device_id)]
+            d.last_tap = (x, y)
+
+    def tap_text(
+        self,
+        device_id: DeviceId,
+        text: str,
+        *,
+        match: str = "first",
+        scroll_to_visible: bool = True,
+    ) -> dict:
+        """Mock tap_text — always succeeds with a synthetic element match.
+
+        Useful for testing the runtime/gate/web layers without a real device.
+        Returns canned bounds 100,200 - 400,250 (300x50 button).
+        """
+        self._require(device_id)
+        bounds = {"x": 100, "y": 200, "w": 300, "h": 50}
+        cx = bounds["x"] + bounds["w"] // 2  # 250
+        cy = bounds["y"] + bounds["h"] // 2  # 225
+        with self._lock:
+            d = self._devices[str(device_id)]
+            d.last_tap = (cx, cy)
+        return {
+            "matched_elements": 1,
+            "tapped_element": {"text": text, "bounds": bounds},
+            "scrolled": False,
+            "duration_ms": 5,
+        }
+
+    def swipe(
+        self,
+        device_id: DeviceId,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        *,
+        duration_ms: int = 300,
+    ) -> None:
+        self._require(device_id)
+        with self._lock:
+            d = self._devices[str(device_id)]
+            d.last_swipe = ((x1, y1), (x2, y2), duration_ms)
 
     def input_text(self, device_id: DeviceId, text: str) -> None:
         self._require(device_id)
+        with self._lock:
+            d = self._devices[str(device_id)]
+            d.last_text = text
 
     def press_key(self, device_id: DeviceId, keycode: str) -> None:
         self._require(device_id)
+        with self._lock:
+            d = self._devices[str(device_id)]
+            d.last_key = keycode
+
+    def run_shell(self, device_id: DeviceId, command: str) -> dict:
+        """Mock run_shell — returns canned output for known commands,
+        empty output for unknown ones. Always succeeds (returncode 0)."""
+        self._require(device_id)
+        # Provide realistic mock output for common commands
+        canned_outputs = {
+            "pm list packages -3": "package:com.example.app1\npackage:com.example.app2\n",
+            "pm list packages": "package:com.android.settings\npackage:com.example.app1\n",
+            "getprop ro.product.model": "MockPhone\n",
+            "getprop ro.build.version.release": "14\n",
+            "df -h": (
+                "Filesystem      Size  Used Avail Use% Mounted on\n"
+                "/dev/block/dm-0  128G   64G   64G  50% /\n"
+            ),
+            "uptime": " 12:34:56 up 1 day,  3:45,  0 users,  load average: 0.45, 0.32, 0.28\n",
+            "ip addr": "1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN\n",
+        }
+        stdout = canned_outputs.get(command.strip(), "")
+        return {
+            "stdout": stdout,
+            "stderr": "",
+            "returncode": 0,
+            "duration_ms": 12,
+        }
+
+    def read_logs(
+        self,
+        device_id: DeviceId,
+        *,
+        lines: int = 100,
+        filter: str | None = None,
+    ) -> dict:
+        """Mock read_logs — returns canned logcat lines."""
+        self._require(device_id)
+        # Generate N fake logcat lines
+        fake_lines = [
+            f"08-02 12:34:{i:02d}.123  1234 5678 I ActivityManager: mock log line {i}"
+            for i in range(min(lines, 20))
+        ]
+        return {
+            "lines": fake_lines,
+            "truncated": False,
+            "total_bytes": sum(len(l.encode("utf-8")) for l in fake_lines),
+        }
 
     # ------------------------------------------------------------------
     # Internals
