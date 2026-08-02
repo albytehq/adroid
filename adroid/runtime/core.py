@@ -583,6 +583,13 @@ class AdroidRuntime:
         # Tool registry: name -> spec
         self._tools: dict[str, ToolSpec] = {t.name: t for t in _V0_TOOLS}
 
+        # v0.3.0: Perception + Memory layer
+        from adroid.perception import ConfidenceTracker, SelfHealingSelector
+        from adroid.memory import MemoryStore
+        self._confidence_tracker = ConfidenceTracker()
+        self._self_healer = SelfHealingSelector(self._confidence_tracker)
+        self._memory = MemoryStore()
+
         # Boot event — first thing in every audit log.
         self._audit_boot()
 
@@ -605,6 +612,16 @@ class AdroidRuntime:
         """PEM for the audit-signing public key. Ship this to log verifiers."""
         from adroid.permissions.tokens import serialize_public_key
         return serialize_public_key(self._audit_public)
+
+    @property
+    def memory(self):
+        """v0.3.0: MemoryStore instance (device/skill/failure memory)."""
+        return self._memory
+
+    @property
+    def confidence_tracker(self):
+        """v0.3.0: ConfidenceTracker instance (per-strategy success stats)."""
+        return self._confidence_tracker
 
     def list_tools(self) -> list[ToolSpec]:
         return list(self._tools.values())
@@ -930,39 +947,129 @@ class AdroidRuntime:
         return {"world_state": ws.model_dump(mode="json")}
 
     def ui_find_elements(self, *, token: CapabilityToken, device_id: DeviceId, selector: dict) -> dict:
-        """Query WorldState for nodes matching selector."""
+        """Query WorldState for nodes matching selector (with self-healing fallback)."""
         from adroid.contract.ui import Selector
         spec = self._require_tool("ui.find_elements")
         self._gate.authorize(token, spec.capability, spec.required_scope)
         sel = Selector(**selector)
         args = {"device_id": str(device_id), "selector": selector}
+
         try:
-            elements = self._bridge.ui_find_elements(device_id, sel)
+            # v0.3.0: Use SelfHealingSelector instead of raw bridge find
+            ws = self._bridge.ui_dump(device_id)
+            app = ws.foreground_package or ""
+            healing_result = self._self_healer.find(ws, sel, app=app, action="find")
+
+            # Auto-learn: if healed, record winning strategy to skill_memory
+            if healing_result.healed and healing_result.winning_strategy:
+                from adroid.memory import skill_key
+                self._memory.remember_skill(
+                    skill_key(app, "find_last"),
+                    {
+                        "winning_strategy": healing_result.winning_strategy.value,
+                        "confidence": healing_result.confidence,
+                        "recommended_selector": healing_result.recommended_selector.model_dump() if healing_result.recommended_selector else None,
+                    },
+                )
+
+            elements = healing_result.nodes
         except AdroidError as exc:
             self._audit_call(token, spec, outcome=AuditOutcome.ERROR, error_code=exc.code, args=args, device_id=device_id)
             raise
         except Exception as exc:
             self._audit_call(token, spec, outcome=AuditOutcome.ERROR, error_code="adroid.unexpected", args=args, device_id=device_id, error=str(exc))
             raise ContractError(f"unexpected bridge error: {exc}", code="adroid.unexpected") from exc
-        self._audit_call(token, spec, outcome=AuditOutcome.SUCCESS, args=args, device_id=device_id, extra_metadata={"matched": len(elements)})
+
+        self._audit_call(token, spec, outcome=AuditOutcome.SUCCESS, args=args, device_id=device_id,
+                         extra_metadata={
+                             "matched": len(elements),
+                             "healed": healing_result.healed,
+                             "winning_strategy": healing_result.winning_strategy.value if healing_result.winning_strategy else None,
+                             "confidence": healing_result.confidence,
+                         })
         return {"elements": [e.model_dump(mode="json") for e in elements]}
 
     def ui_tap_element(self, *, token: CapabilityToken, device_id: DeviceId, selector: dict) -> dict:
-        """Find node by selector, tap its center."""
-        from adroid.contract.ui import Selector
+        """Find node by selector (with self-healing), tap its center."""
+        from adroid.contract.ui import Selector, TapElementResult
         spec = self._require_tool("ui.tap_element")
         self._gate.authorize(token, spec.capability, spec.required_scope)
         sel = Selector(**selector)
         args = {"device_id": str(device_id), "selector": selector}
+
         try:
-            result = self._bridge.ui_tap_element(device_id, sel)
+            # v0.3.0: Self-healing find → then tap via bridge
+            ws = self._bridge.ui_dump(device_id)
+            app = ws.foreground_package or ""
+            healing_result = self._self_healer.find(ws, sel, app=app, action="tap")
+
+            if not healing_result.matched:
+                # Auto-learn: record failure to failure_memory
+                from adroid.memory import failure_key
+                self._memory.remember_failure(
+                    failure_key(app, str(selector)),
+                    {
+                        "selector": selector,
+                        "strategies_tried": [s.value for s in healing_result.strategies_tried],
+                        "device_model": ws.foreground_package,
+                    },
+                )
+                result = TapElementResult(
+                    matched_nodes=0,
+                    tapped=False,
+                    selector_strategy=healing_result.original_strategy.value,
+                    duration_ms=0,
+                )
+                self._audit_call(token, spec, outcome=AuditOutcome.SUCCESS, args=args, device_id=device_id,
+                                 extra_metadata={"matched": 0, "tapped": False, "healed": False})
+                return result.model_dump(mode="json")
+
+            # Pick the target node
+            target = healing_result.nodes[0]
+            if sel.match == "last":
+                target = healing_result.nodes[-1]
+            elif sel.match == "best":
+                target = max(healing_result.nodes, key=lambda n: len(n.text or n.description or ""))
+
+            cx, cy = target.bounds.center
+            self._bridge.tap(device_id, cx, cy)
+
+            # Auto-learn: record successful strategy to skill_memory
+            from adroid.memory import skill_key
+            self._memory.remember_skill(
+                skill_key(app, "tap_last"),
+                {
+                    "winning_strategy": healing_result.winning_strategy.value,
+                    "confidence": healing_result.confidence,
+                    "tap_coords": {"x": cx, "y": cy},
+                    "node_text": target.text,
+                    "node_resource_id": target.resource_id,
+                },
+            )
+
+            result = TapElementResult(
+                matched_nodes=len(healing_result.nodes),
+                tapped=True,
+                tapped_node=target,
+                tap_coordinates={"x": cx, "y": cy},
+                selector_strategy=healing_result.winning_strategy.value if healing_result.winning_strategy else "a11y",
+                duration_ms=0,
+            )
         except AdroidError as exc:
             self._audit_call(token, spec, outcome=AuditOutcome.ERROR, error_code=exc.code, args=args, device_id=device_id)
             raise
         except Exception as exc:
             self._audit_call(token, spec, outcome=AuditOutcome.ERROR, error_code="adroid.unexpected", args=args, device_id=device_id, error=str(exc))
             raise ContractError(f"unexpected bridge error: {exc}", code="adroid.unexpected") from exc
-        self._audit_call(token, spec, outcome=AuditOutcome.SUCCESS, args=args, device_id=device_id, extra_metadata={"matched": result.matched_nodes, "tapped": result.tapped})
+
+        self._audit_call(token, spec, outcome=AuditOutcome.SUCCESS, args=args, device_id=device_id,
+                         extra_metadata={
+                             "matched": result.matched_nodes,
+                             "tapped": result.tapped,
+                             "healed": healing_result.healed,
+                             "winning_strategy": healing_result.winning_strategy.value if healing_result.winning_strategy else None,
+                             "confidence": healing_result.confidence,
+                         })
         return result.model_dump(mode="json")
 
     def ui_wait_for(self, *, token: CapabilityToken, device_id: DeviceId, condition: dict) -> dict:
