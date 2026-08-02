@@ -94,6 +94,126 @@ class ApprovalBroker:
         self._listeners: list[Callable[[], None]] = []
         self._history: list[PendingApproval] = []  # capped at 100
         self._history_cap = 100
+        # Async result store: approval_id → tool result (dict) or Exception
+        # Filled by the worker thread that runs the tool after approval.
+        self._results: dict[str, dict] = {}
+        self._errors: dict[str, Exception] = {}
+
+    def submit(
+        self,
+        approval: PendingApproval,
+    ) -> str:
+        """Register an approval WITHOUT blocking. Returns the approval_id.
+
+        Use this for async flow:
+            1. Agent POSTs /agent/call → broker.submit(approval) → return 202 + approval_id
+            2. Agent polls /agent/result/{approval_id} until decision != None
+            3. Browser UI calls /api/approve/{id} or /api/deny/{id}
+            4. Worker thread (separate) executes the tool, stores result
+            5. /agent/result/{id} returns the final result
+
+        The caller is responsible for executing the tool AFTER approval —
+        broker only tracks the decision state.
+        """
+        with self._lock:
+            self._pending[approval.approval_id] = approval
+            self._events[approval.approval_id] = threading.Event()
+        self._notify_listeners()
+        return approval.approval_id
+
+    def wait_for_decision(
+        self,
+        approval_id: str,
+        *,
+        timeout_seconds: float = 60.0,
+    ) -> PendingApproval | None:
+        """Block until a decision is made. Returns the approval (with decision
+        filled) or None if not found. Used by worker threads that need to
+        block until the user decides."""
+        with self._lock:
+            approval = self._pending.get(approval_id)
+            event = self._events.get(approval_id)
+            if approval is None or event is None:
+                return None
+        decided = event.wait(timeout=timeout_seconds)
+
+        with self._lock:
+            approval = self._pending.pop(approval_id, None)
+            self._events.pop(approval_id, None)
+            if approval is None:
+                return None
+            if not decided:
+                approval.decision = "timeout"
+                approval.decided_at = datetime.now(timezone.utc)
+            self._history.append(approval)
+            if len(self._history) > self._history_cap:
+                self._history = self._history[-self._history_cap:]
+
+        self._notify_listeners()
+        return approval
+
+    def store_result(self, approval_id: str, result: dict) -> None:
+        """Store the tool's result for an approved call. The agent polls
+        /agent/result/{approval_id} to retrieve this."""
+        with self._lock:
+            self._results[approval_id] = result
+
+    def store_error(self, approval_id: str, exc: Exception) -> None:
+        """Store an error raised during tool execution."""
+        with self._lock:
+            self._errors[approval_id] = exc
+
+    def get_result(self, approval_id: str) -> dict | None:
+        """Return the stored result, or None if not yet available. Raises
+        the stored exception if one was stored instead."""
+        with self._lock:
+            if approval_id in self._errors:
+                raise self._errors[approval_id]
+            return self._results.get(approval_id)
+
+    def get_status(self, approval_id: str) -> dict | None:
+        """Return the current status of an approval:
+            - {state: "pending"} if waiting for decision
+            - {state: "approved", decided_at: ..., approver: ...} if approved but result not ready
+            - {state: "denied", decided_at: ..., approver: ...} if denied
+            - {state: "timeout", decided_at: ...} if timed out
+            - {state: "completed", result: {...}} if approved + result stored
+            - {state: "error", error: {...}} if approved + error stored
+            - None if approval_id is unknown
+        """
+        with self._lock:
+            # Check history first (decided approvals)
+            for a in reversed(self._history):
+                if a.approval_id == approval_id:
+                    if approval_id in self._errors:
+                        exc = self._errors[approval_id]
+                        return {
+                            "state": "error",
+                            "decision": a.decision,
+                            "decided_at": a.decided_at.isoformat() if a.decided_at else None,
+                            "approver": a.approver,
+                            "error": {
+                                "type": type(exc).__name__,
+                                "message": str(exc),
+                            },
+                        }
+                    if approval_id in self._results:
+                        return {
+                            "state": "completed",
+                            "decision": a.decision,
+                            "decided_at": a.decided_at.isoformat() if a.decided_at else None,
+                            "approver": a.approver,
+                            "result": self._results[approval_id],
+                        }
+                    return {
+                        "state": a.decision or "pending",
+                        "decided_at": a.decided_at.isoformat() if a.decided_at else None,
+                        "approver": a.approver,
+                    }
+            # Check pending
+            if approval_id in self._pending:
+                return {"state": "pending"}
+            return None
 
     def request(
         self,

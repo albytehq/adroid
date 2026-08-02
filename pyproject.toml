@@ -60,6 +60,7 @@ Issues = "https://github.com/albytehq/adroid/issues"
 adroid-start = "adroid.cli:main"
 adroid-issue-token = "adroid.mcp.issue_token:main"
 adroid-mcp-server = "adroid.mcp.server:main"
+adroid-pair = "adroid.pair:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

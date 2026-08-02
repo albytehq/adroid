@@ -37,7 +37,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ValidationError
 
 from adroid.bridge.mock import InMemoryBlobStore, MockBridge
-from adroid.contract.errors import AdroidError
+from adroid.contract.errors import AdroidError, PermissionDeniedError
 from adroid.contract.types import (
     AppInfo,
     AuditEvent,
@@ -49,7 +49,7 @@ from adroid.contract.types import (
     Scope,
     Screenshot,
 )
-from adroid.permissions.interactive import ApprovalBroker, InteractiveGate
+from adroid.permissions.interactive import ApprovalBroker, InteractiveGate, PendingApproval
 from adroid.runtime.core import AdroidRuntime
 
 log = logging.getLogger(__name__)
@@ -81,6 +81,30 @@ class AgentCallResponse(BaseModel):
     error: dict[str, Any] | None = None
     audit_event_id: str | None = None
     approval_id: str | None = None  # present if interactive approval happened
+
+
+class AsyncAgentCallResponse(BaseModel):
+    """Response for /agent/call when async=true query param is set.
+
+    For READ scope calls: same as sync — returns immediately with result.
+    For ACT/ADMIN scope calls: returns 202 with approval_id + approval_url.
+    The agent polls /agent/result/{approval_id} until state != "pending".
+    """
+    status: str  # "completed" | "pending_approval" | "error"
+    approval_id: str | None = None
+    approval_url: str | None = None  # absolute URL the agent can share with the user
+    result: dict[str, Any] | None = None
+    error: dict[str, Any] | None = None
+
+
+class AsyncResultResponse(BaseModel):
+    """Response for /agent/result/{approval_id}."""
+    state: str  # "pending" | "approved" | "denied" | "timeout" | "completed" | "error"
+    decision: str | None = None
+    decided_at: str | None = None
+    approver: str | None = None
+    result: dict[str, Any] | None = None
+    error: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +280,181 @@ def _dispatch_tool(
         return {"launched": True}
 
     # Should not reach here (tool_map check above would have 404'd)
+    raise HTTPException(status_code=500, detail="unreachable")
+
+
+def _dispatch_tool_async(
+    state: ServerState,
+    *,
+    token: CapabilityToken,
+    tool: str,
+    args: dict[str, Any],
+    request: Request,
+) -> dict[str, Any]:
+    """Async dispatch — for ACT/ADMIN scope, registers a pending approval
+    and returns immediately with the approval_id + URL.
+
+    Returns a dict with one of these shapes:
+        {"status": "completed", "result": {...}}            — READ scope, executed
+        {"status": "pending_approval", "approval_id": ..., "approval_url": ...}
+        {"status": "error", "error": {...}}
+    """
+    terminal = state.terminal
+
+    tool_map = {
+        "device.list": (Capability.DEVICE_LIST, Scope.READ),
+        "device.observe": (Capability.DEVICE_OBSERVE, Scope.READ),
+        "device.screenshot": (Capability.DEVICE_SCREENSHOT, Scope.READ),
+        "app.list": (Capability.APP_LIST, Scope.READ),
+        "app.launch": (Capability.APP_LAUNCH, Scope.ACT),
+    }
+
+    if tool not in tool_map:
+        raise HTTPException(
+            status_code=404,
+            detail=f"unknown tool: {tool}",
+        )
+
+    capability, required_scope = tool_map[tool]
+    method_label = f"runtime.{tool.replace('.', '_')}"
+
+    args_summary = json.dumps(args, default=str)
+    terminal.append(
+        kind="request",
+        text=f"{tool}({args_summary}) [async]",
+        subject=token.subject,
+        capability=capability.value,
+        scope=required_scope.value,
+    )
+
+    # Step 1: standard token + scope + rate-limit checks (may raise AdroidError)
+    state.gate.authorize(token, capability, required_scope)
+
+    # Step 2: if READ scope, just execute synchronously — no approval needed
+    if required_scope == Scope.READ:
+        try:
+            result = _execute_tool(state, token=token, tool=tool, args=args)
+            terminal.append(kind="result", text=f"{tool} → ok [async]")
+            return {"status": "completed", "result": result}
+        except AdroidError as exc:
+            terminal.append(kind="error", text=f"{tool} failed: {exc.code}")
+            return {
+                "status": "error",
+                "error": {
+                    "code": exc.code,
+                    "message": str(exc),
+                    "details": exc.details,
+                },
+            }
+
+    # Step 3: ACT/ADMIN scope — register pending approval, return immediately
+    approval = PendingApproval(
+        token_id=token.token_id,
+        subject=token.subject,
+        capability=capability,
+        required_scope=required_scope,
+        method=method_label,
+        args=args,
+        device_id=args.get("device_id", {}).get("value") if isinstance(args.get("device_id"), dict) else None,
+    )
+    state.broker.submit(approval)
+
+    # Build absolute approval URL for the agent to share with the user.
+    # The browser UI uses hash routing for direct approval links:
+    #   /ui#approval-{id}  → highlights + scrolls to that card
+    base_url = str(request.base_url).rstrip("/")
+    approval_url = f"{base_url}/ui#approval-{approval.approval_id}"
+
+    terminal.append(
+        kind="system",
+        text=f"pending approval {approval.approval_id[:8]} — share URL with user",
+    )
+
+    # Step 4: launch a worker thread that waits for the decision, then
+    # executes the tool (or stores denial). The agent polls /agent/result.
+    def worker():
+        decided = state.broker.wait_for_decision(
+            approval.approval_id,
+            timeout_seconds=state.gate._approval_timeout,  # noqa: SLF001
+        )
+        if decided is None or decided.decision != "approved":
+            # Denied or timed out — store an exception so /agent/result returns error
+            err_code = f"adroid.permission.interactive_{decided.decision if decided else 'unknown'}"
+            state.broker.store_error(
+                approval.approval_id,
+                PermissionDeniedError(
+                    f"interactive approval {decided.decision if decided else 'unknown'}",
+                    code=err_code,
+                ),
+            )
+            terminal.append(
+                kind="error",
+                text=f"{tool} denied/timeout (approval_id={approval.approval_id[:8]})",
+            )
+            return
+
+        # Approved — execute the tool, store result
+        terminal.append(
+            kind="system",
+            text=f"approved by {decided.approver or 'unknown'} (approval_id={approval.approval_id[:8]})",
+        )
+        try:
+            result = _execute_tool(state, token=token, tool=tool, args=args)
+            state.broker.store_result(approval.approval_id, result)
+            terminal.append(kind="result", text=f"{tool} → ok [async post-approval]")
+        except AdroidError as exc:
+            state.broker.store_error(approval.approval_id, exc)
+            terminal.append(kind="error", text=f"{tool} failed post-approval: {exc.code}")
+        except Exception as exc:
+            state.broker.store_error(approval.approval_id, exc)
+            terminal.append(kind="error", text=f"{tool} raised {type(exc).__name__}: {exc}")
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    return {
+        "status": "pending_approval",
+        "approval_id": approval.approval_id,
+        "approval_url": approval_url,
+    }
+
+
+def _execute_tool(
+    state: ServerState,
+    *,
+    token: CapabilityToken,
+    tool: str,
+    args: dict[str, Any],
+) -> dict[str, Any]:
+    """Execute a tool call against the runtime. Assumes gate has already
+    authorized. Raises AdroidError on failure."""
+    if tool == "device.list":
+        devices = state.runtime.list_devices(token=token)
+        return {"devices": [d.model_dump(mode="json") for d in devices]}
+
+    if tool == "device.observe":
+        did = DeviceId.model_validate(args["device_id"])
+        info = state.runtime.observe_device(token=token, device_id=did)
+        return {"device": info.model_dump(mode="json")}
+
+    if tool == "device.screenshot":
+        did = DeviceId.model_validate(args["device_id"])
+        shot = state.runtime.capture_screenshot(token=token, device_id=did)
+        return {"screenshot": shot.model_dump(mode="json")}
+
+    if tool == "app.list":
+        did = DeviceId.model_validate(args["device_id"])
+        apps = state.runtime.list_installed_apps(token=token, device_id=did)
+        return {"apps": [a.model_dump(mode="json") for a in apps]}
+
+    if tool == "app.launch":
+        did = DeviceId.model_validate(args["device_id"])
+        state.runtime.launch_app(
+            token=token,
+            device_id=did,
+            package_name=args["package_name"],
+        )
+        return {"launched": True}
+
     raise HTTPException(status_code=500, detail="unreachable")
 
 
@@ -455,6 +654,133 @@ def create_app(
                     "type": type(exc).__name__,
                 },
             )
+
+    # ------------------------------------------------------------------
+    # Agent HTTP API — ASYNC mode (for chat-based / non-blocking agents)
+    # ------------------------------------------------------------------
+
+    @app.post("/agent/call/async", response_model=AsyncAgentCallResponse)
+    def agent_call_async(req: AgentCallRequest, request: Request):
+        """Async variant of /agent/call. For ACT/ADMIN scope, returns
+        immediately with approval_id + approval_url. Agent polls
+        /agent/result/{approval_id} for the final result.
+
+        Use this when the agent cannot hold a long-lived HTTP connection
+        (e.g. chat-based agents like me over IM).
+
+        Equivalent to /agent/call?async=true — kept as a separate path
+        for explicitness and easier routing in proxies.
+        """
+        try:
+            token = CapabilityToken.model_validate(req.token)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"invalid token: {exc.errors()}",
+            )
+
+        try:
+            outcome = _dispatch_tool_async(
+                state,
+                token=token,
+                tool=req.tool,
+                args=req.args,
+                request=request,
+            )
+        except HTTPException:
+            raise
+        except AdroidError as exc:
+            state.terminal.append(
+                kind="error",
+                text=f"{req.tool} failed: {exc.code} — {exc}",
+            )
+            return AsyncAgentCallResponse(
+                status="error",
+                error={
+                    "code": exc.code,
+                    "message": str(exc),
+                    "details": exc.details,
+                },
+            )
+        except Exception as exc:
+            state.terminal.append(
+                kind="error",
+                text=f"{req.tool} raised {type(exc).__name__}: {exc}",
+            )
+            return AsyncAgentCallResponse(
+                status="error",
+                error={
+                    "code": "adroid.unexpected",
+                    "message": str(exc),
+                    "type": type(exc).__name__,
+                },
+            )
+
+        if outcome["status"] == "pending_approval":
+            return AsyncAgentCallResponse(
+                status="pending_approval",
+                approval_id=outcome["approval_id"],
+                approval_url=outcome["approval_url"],
+            )
+        elif outcome["status"] == "completed":
+            return AsyncAgentCallResponse(
+                status="completed",
+                result=outcome["result"],
+            )
+        else:
+            return AsyncAgentCallResponse(
+                status="error",
+                error=outcome.get("error", {"code": "adroid.unknown", "message": "unknown error"}),
+            )
+
+    @app.get("/agent/result/{approval_id}", response_model=AsyncResultResponse)
+    def agent_result(approval_id: str):
+        """Poll for the result of an async agent call.
+
+        Returns the current state. Agent should keep polling every 1-3s
+        until state is "completed", "denied", "timeout", or "error".
+        """
+        status = state.broker.get_status(approval_id)
+        if status is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"unknown approval_id: {approval_id}",
+            )
+
+        if status["state"] in ("completed",):
+            return AsyncResultResponse(
+                state="completed",
+                decision=status.get("decision"),
+                decided_at=status.get("decided_at"),
+                approver=status.get("approver"),
+                result=status.get("result"),
+            )
+        if status["state"] in ("error",):
+            return AsyncResultResponse(
+                state="error",
+                decision=status.get("decision"),
+                decided_at=status.get("decided_at"),
+                approver=status.get("approver"),
+                error=status.get("error"),
+            )
+        if status["state"] in ("denied", "timeout"):
+            return AsyncResultResponse(
+                state=status["state"],
+                decision=status.get("decision"),
+                decided_at=status.get("decided_at"),
+                approver=status.get("approver"),
+                error={
+                    "code": f"adroid.permission.interactive_{status['state']}",
+                    "message": f"interactive approval {status['state']}",
+                },
+            )
+        # pending or approved-but-not-yet-completed
+        return AsyncResultResponse(
+            state=status["state"],
+            decision=status.get("decision"),
+            decided_at=status.get("decided_at"),
+            approver=status.get("approver"),
+        )
 
     # ------------------------------------------------------------------
     # WebSocket — live terminal + pending updates

@@ -222,6 +222,17 @@
     </div>
   </div>
 
+  <div class="panel" style="margin-top: 16px;">
+    <div class="panel-header">
+      <h2>Latest Screenshot</h2>
+      <span id="screenshot-meta" class="meta" style="color: var(--text-dim); font-family: var(--mono); font-size: 12px;"></span>
+    </div>
+    <div class="panel-body" style="text-align: center; padding: 16px;">
+      <img id="screenshot-img" src="" alt="No screenshot yet" style="max-width: 100%; max-height: 400px; border: 1px solid var(--border); border-radius: 4px; display: none;" />
+      <div id="screenshot-empty" class="empty">No screenshots captured yet</div>
+    </div>
+  </div>
+
   <script>
     const pendingList = document.getElementById('pending-list');
     const terminal = document.getElementById('terminal');
@@ -241,8 +252,12 @@
         pendingList.innerHTML = '<div class="empty">No pending requests</div>';
         return;
       }
-      pendingList.innerHTML = items.map(p => `
-        <div class="pending-card" id="pending-${p.approval_id}">
+      // Check if there's a hash in the URL pointing to a specific approval
+      const hashId = (location.hash || '').replace('#approval-', '');
+      pendingList.innerHTML = items.map(p => {
+        const highlighted = p.approval_id === hashId ? 'background: var(--panel); border-left-width: 5px;' : '';
+        return `
+        <div class="pending-card" id="pending-${p.approval_id}" style="${highlighted}">
           <div class="tool">${p.capability} <span style="color: var(--text-dim); font-weight: 400; font-size: 12px;">[${p.required_scope}]</span></div>
           <div class="row"><span class="label">subject</span><span class="value">${p.subject}</span></div>
           <div class="row"><span class="label">method</span><span class="value">${p.method}</span></div>
@@ -254,7 +269,35 @@
             <button class="btn deny" onclick="deny('${p.approval_id}')">Deny</button>
           </div>
         </div>
-      `).join('');
+      `}).join('');
+      // Scroll the highlighted one into view
+      if (hashId) {
+        const el = document.getElementById('pending-' + hashId);
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }
+
+    async function refreshScreenshot() {
+      try {
+        // Pull audit log, find latest device.screenshot success
+        const res = await fetch('/api/audit?limit=50');
+        const events = await res.json();
+        const shot = events.reverse().find(e =>
+          e.method === 'runtime.device_screenshot' &&
+          e.outcome === 'success' &&
+          e.metadata && e.metadata.blob_ref
+        );
+        const img = document.getElementById('screenshot-img');
+        const empty = document.getElementById('screenshot-empty');
+        const meta = document.getElementById('screenshot-meta');
+        if (shot) {
+          const ref = shot.metadata.blob_ref;
+          img.src = `/blob/${ref}/raw?t=${Date.now()}`;
+          img.style.display = 'inline-block';
+          empty.style.display = 'none';
+          meta.textContent = `${shot.metadata.width}x${shot.metadata.height} · blob=${ref.slice(0,12)}… · ${fmtTs(shot.timestamp)}`;
+        }
+      } catch (e) {}
     }
 
     function appendTerminal(line) {
@@ -327,14 +370,25 @@
     }
     connect();
 
-    // Also poll /api/pending every 2s as backup
+    // Also poll /api/pending every 2s as backup + refresh screenshot
     setInterval(async () => {
       try {
         const res = await fetch('/api/pending');
         const items = await res.json();
         renderPending(items);
+        await refreshScreenshot();
       } catch (e) {}
     }, 2000);
+
+    // Initial screenshot refresh
+    refreshScreenshot();
+
+    // Re-render pending when hash changes (agent shared URL → user clicked it)
+    window.addEventListener('hashchange', async () => {
+      const res = await fetch('/api/pending');
+      const items = await res.json();
+      renderPending(items);
+    });
   </script>
 </body>
 </html>

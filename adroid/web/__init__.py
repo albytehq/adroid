@@ -3,6 +3,8 @@
 from adroid.web.server import (
     AgentCallRequest,
     AgentCallResponse,
+    AsyncAgentCallResponse,
+    AsyncResultResponse,
     ServerState,
     TerminalStream,
     create_app,
@@ -12,6 +14,8 @@ from adroid.web.server import (
 __all__ = [
     "AgentCallRequest",
     "AgentCallResponse",
+    "AsyncAgentCallResponse",
+    "AsyncResultResponse",
     "ServerState",
     "TerminalStream",
     "create_app",

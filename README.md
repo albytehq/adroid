@@ -35,53 +35,71 @@ hash-chained, append-only audit log.
 
 ```
                 ┌──────────────────────────────────────────┐
-                │            AI Agent (HTTP client)         │
-                │  POST /agent/call with CapabilityToken   │
+                │         AI Agent (HTTP client)           │
+                │   any chat agent / script / IDE plugin   │
                 └──────────────────┬───────────────────────┘
                                    │
+                                   │ POST /agent/call/async
+                                   │   { token, tool, args }
                                    ▼
                 ┌──────────────────────────────────────────┐
-                │            AdroidRuntime + WebServer      │
-                │  ┌─────────┐  ┌─────────┐  ┌──────────┐  │
-                │  │ Contract│  │  Gate   │  │  Audit   │  │
-                │  │ (typed) │→ │ (scope) │→ │ (signed) │  │
-                │  └─────────┘  └────┬────┘  └──────────┘  │
-                │                     │ interactive         │
-                │       ┌─────────────┴──────────────┐     │
-                │       │  Browser Permission UI     │     │
-                │       │  /ui  /ws  /pending        │     │
-                │       │  /approve  /deny           │     │
-                │       └────────────────────────────┘     │
-                │  ┌──────────────────────────────────────┐ │
-                │  │         DeviceBridge (Protocol)      │ │
-                │  └──────────────────────────────────────┘ │
+                │      LAPTOP (server + monitor UI)        │
+                │  ┌────────────────────────────────────┐  │
+                │  │  Adroid Runtime (Python)           │  │
+                │  │  ┌──────────┐  ┌────────────────┐  │  │
+                │  │  │ Contract │  │ Audit Log      │  │  │
+                │  │  │ (typed)  │  │ (signed chain) │  │  │
+                │  │  └──────────┘  └────────────────┘  │  │
+                │  │  ┌────────────────────────────────┐ │  │
+                │  │  │ InteractiveGate                │ │  │
+                │  │  │  ├── READ scope: auto-approve  │ │  │
+                │  │  │  └── ACT/ADMIN: block + URL    │ │  │
+                │  │  └────────────────────────────────┘ │  │
+                │  │  ┌────────────────────────────────┐ │  │
+                │  │  │ AdbBridge → ADB → USB/WiFi     │ │  │
+                │  │  └────────────────────────────────┘ │  │
+                │  └────────────────────────────────────┘  │
+                │                                          │
+                │  Browser (your laptop):                  │
+                │    /ui  →  approve/deny + live terminal  │
+                │             + screenshot preview         │
                 └──────────────────┬───────────────────────┘
                                    │
-                ┌──────────────────▼───────────────────────┐
-                │       Bridge implementations             │
-                │  ┌─────────┐  ┌─────────┐  ┌──────────┐ │
-                │  │   ADB   │  │ Termux  │  │  Mock    │ │
-                │  │(USB/net)│  │ (on phone)│ │(testing)│ │
-                │  └─────────┘  └─────────┘  └──────────┘ │
+                                   │ ADB (USB cable or WiFi)
+                                   ▼
+                ┌──────────────────────────────────────────┐
+                │           ANDROID PHONE (target)         │
+                │  - USB Debugging ON                      │
+                │  - Tap "Allow" on RSA prompt (1x)        │
+                │  - No Adroid software on the phone       │
                 └──────────────────────────────────────────┘
 ```
 
-### Permission flow
+### Async agent flow (the main use case)
 
-1. AI agent POSTs to `/agent/call` with a signed `CapabilityToken`.
-2. Runtime validates token (signature, expiry, issuer).
-3. Gate checks capability + scope + rate limit.
-4. **If READ scope**: auto-approve, proceed immediately.
-5. **If ACT or ADMIN scope**: create `PendingApproval`, block the call.
-6. Browser dashboard shows the request (tool name, args, subject, timestamp).
-7. User taps **Approve** or **Deny** → `/api/approve/{id}` or `/api/deny/{id}`.
-8. Gate unblocks; runtime executes (or raises `PermissionDeniedError`).
-9. Audit log records the outcome (success/error/denied) with the approver's ID.
-10. WebSocket streams every step (request, approval, result, error) to the dashboard in real time.
+For chat-based AI agents (like the one talking to you right now) that
+can't hold long-lived HTTP connections:
+
+1. **Agent** POSTs to `/agent/call/async` with `{token, tool, args}`.
+2. **Server** validates token + scope + rate limit.
+   - READ scope → executes immediately, returns `{status: "completed", result: {...}}`.
+   - ACT/ADMIN scope → registers pending approval, returns `{status: "pending_approval", approval_id, approval_url}`.
+3. **Agent** shares the `approval_url` with the human (via chat, email, whatever).
+4. **Human** opens `approval_url` in browser → dashboard scrolls to + highlights the pending card.
+5. **Human** taps **Approve** or **Deny**.
+6. **Agent** polls `/agent/result/{approval_id}` every 1–3 seconds.
+   - `state: "pending"` → keep polling
+   - `state: "completed"` → read `result`, continue
+   - `state: "denied"` / `"timeout"` / `"error"` → handle gracefully
+7. **Audit log** records every step (request, approval, execution, result).
+
+This is the flow we just used to test — and it works. The agent never
+holds a connection open; the human can take as long as they want to
+approve; everything is signed and replayable.
 
 ## Install
 
-### On a host (laptop / server / cloud)
+### On a laptop (the primary mode)
 
 ```bash
 git clone https://github.com/albytehq/adroid.git
@@ -90,7 +108,13 @@ pip install -e ".[web,dev,mcp]"
 pytest
 ```
 
-### On an Android phone (via Termux)
+You'll also need the `adb` binary:
+
+- Debian/Ubuntu: `sudo apt install android-tools-adb`
+- macOS: `brew install android-tools`
+- Windows: download platform-tools from developer.android.com
+
+### On an Android phone (alternative Termux mode — runtime runs ON the phone)
 
 1. Install Termux from **F-Droid** (NOT Play Store — Play Store version is deprecated).
 2. Install Termux:API from F-Droid.
@@ -100,82 +124,168 @@ pytest
 curl -fsSL https://raw.githubusercontent.com/albytehq/adroid/main/scripts/install_termux.sh | bash
 ```
 
-Or manually:
-
-```bash
-pkg install python git termux-api curl
-pip install "git+https://github.com/albytehq/adroid.git@main#egg=adroid[web,termux]"
-```
+This mode is useful if you don't have a laptop or want the runtime to live on the phone permanently. The primary mode (laptop + ADB) is recommended — easier to monitor, more powerful (full ADB control including input injection), and the audit log stays on a machine you control.
 
 ## Quick start
 
-### Mode 1: Mock (no phone needed — for dev / demo)
+### Step 1: Pair the phone (USB or WiFi)
+
+Plug the phone in via USB, enable USB debugging in Developer Options, then:
 
 ```bash
-adroid-start --bridge mock --port 7654
+adroid-pair --list                    # see connected devices
+adroid-pair                           # interactive verify
+adroid-pair --wireless 192.168.1.42:pairing-port --code 123456   # WiFi pairing (Android 11+)
 ```
 
-Open `http://localhost:7654/ui` in your browser. The runtime prints a
-starter agent token — use it to POST to `/agent/call`.
+The phone will show an "Allow USB debugging?" prompt with your laptop's
+RSA fingerprint. Tap **Allow** (and check "Always allow from this computer"
+to skip future prompts).
 
-### Mode 2: Termux (control your phone from anywhere)
-
-On the phone (inside Termux):
+### Step 2: Start the runtime
 
 ```bash
-adroid-start --bridge termux --port 7654
+adroid-start --bridge adb --port 7654
 ```
 
-In another Termux session, expose to the internet:
+The runtime prints a **starter agent token** (24h TTL, ACT scope on all 5
+tools). Copy it — you'll give it to your AI agent.
+
+### Step 3: Expose to the internet (so the agent can reach it)
+
+If the agent runs on a different machine (e.g. a cloud-hosted LLM):
 
 ```bash
-# Option A: cloudflared (recommended)
+# Option A: cloudflared (recommended, free, no signup)
 cloudflared tunnel --url http://localhost:7654
 
 # Option B: ngrok
 ngrok http 7654
 ```
 
-Open the public URL in your phone's browser → you'll see the permission
-dashboard. Give the public URL + starter token to your AI agent. Every
-ACT-scope request will block until you tap Approve.
+You'll get a public URL like `https://random-name.trycloudflare.com`.
 
-### Mode 3: ADB (laptop controlling a USB-connected phone)
+### Step 4: Open the dashboard
+
+Open `http://localhost:7654/ui` in your laptop browser. You'll see:
+- **Pending Approvals** panel — empty for now, will fill as the agent makes ACT-scope requests
+- **Agent Terminal** panel — shows every request, result, error in real time
+- **Latest Screenshot** panel — auto-refreshes when the agent captures one
+
+### Step 5: Give the agent URL + token
+
+Tell your AI agent (e.g. paste into chat):
+
+> "Use Adroid runtime at `https://random-name.trycloudflare.com`.
+> Here's your token: `<paste token JSON>`.
+> Use POST /agent/call/async with `{token, tool, args}`.
+> For ACT-scope tools, you'll get back `approval_url` — share it with me
+> and I'll approve in my browser."
+
+### Step 6: Watch the magic
+
+When the agent calls `app.launch` (ACT scope):
+1. Agent POSTs → gets back `approval_url`
+2. Agent shares URL with you in chat
+3. You click URL → dashboard scrolls to highlighted pending card
+4. You tap **Approve** (or **Deny**)
+5. Agent polls → gets result → continues
+
+Every step is in the audit log + live terminal.
+
+### Mode: Mock (no phone needed — for dev / demo)
 
 ```bash
-# Enable USB debugging on the phone, plug it in
-adb devices  # should show the device
-adroid-start --bridge adb --port 7654 --adb-path $(which adb)
+adroid-start --bridge mock --port 7654
 ```
+
+Same flow, but the "phone" is a mock in memory. Useful for testing the
+agent API without any hardware.
 
 ## Using the agent API
 
-Once the runtime is running, any HTTP client can act as an AI agent:
+### Async flow (recommended for chat-based agents)
+
+```python
+import requests
+import time
+
+RUNTIME_URL = "https://your-cloudflare-url.trycloudflare.com"
+TOKEN_JSON = {...}  # the starter token from runtime output
+
+# READ scope — completes immediately
+res = requests.post(f"{RUNTIME_URL}/agent/call/async", json={
+    "token": TOKEN_JSON,
+    "tool": "device.list",
+    "args": {},
+}, timeout=30)
+body = res.json()
+if body["status"] == "completed":
+    devices = body["result"]["devices"]
+    print(f"Found {len(devices)} device(s)")
+
+# ACT scope — returns pending_approval + URL to share with the human
+res = requests.post(f"{RUNTIME_URL}/agent/call/async", json={
+    "token": TOKEN_JSON,
+    "tool": "app.launch",
+    "args": {
+        "device_id": {"kind": "adb", "value": "emulator-5554"},  # or your device serial
+        "package_name": "com.example.app",
+    },
+}, timeout=30)
+body = res.json()
+if body["status"] == "pending_approval":
+    print(f"Hey human, please approve: {body['approval_url']}")
+    # Poll until terminal
+    while True:
+        r = requests.get(f"{RUNTIME_URL}/agent/result/{body['approval_id']}", timeout=10)
+        state = r.json()
+        if state["state"] in ("completed", "denied", "timeout", "error"):
+            break
+        time.sleep(2)
+    if state["state"] == "completed":
+        print(f"Launched! result={state['result']}, approved by {state['approver']}")
+    else:
+        print(f"Failed: state={state['state']}, error={state.get('error')}")
+```
+
+### Sync flow (for non-chat agents that can hold connections)
 
 ```python
 import requests
 
-RUNTIME_URL = "https://your-ngrok-url.ngrok.app"
-TOKEN_JSON = {...}  # the starter token from runtime output
+RUNTIME_URL = "https://your-cloudflare-url.trycloudflare.com"
+TOKEN_JSON = {...}
 
-# READ scope — auto-approved
-res = requests.post(f"{RUNTIME_URL}/agent/call", json={
-    "token": TOKEN_JSON,
-    "tool": "device.list",
-    "args": {},
-})
-devices = res.json()["result"]["devices"]
-
-# ACT scope — blocks until the phone owner approves in browser
+# Blocks until approval or denial (default timeout 60s, configurable on the server)
 res = requests.post(f"{RUNTIME_URL}/agent/call", json={
     "token": TOKEN_JSON,
     "tool": "app.launch",
-    "args": {
-        "device_id": {"kind": "termux", "value": "self"},
-        "package_name": "com.example.app",
-    },
-}, timeout=120)  # generous timeout for human approval
+    "args": {"device_id": {"kind": "adb", "value": "emulator-5554"}, "package_name": "com.example.app"},
+}, timeout=120)
+body = res.json()
+# body["ok"] is True on success, False on denial/error
+# body["approval_id"] is set if interactive approval happened
 ```
+
+### Endpoints summary
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/agent/call` | Sync agent call (blocks on approval) |
+| POST | `/agent/call/async` | Async agent call (returns approval URL for ACT scope) |
+| GET | `/agent/result/{approval_id}` | Poll for async result |
+| GET | `/api/pending` | List pending approvals (browser dashboard uses this) |
+| POST | `/api/approve/{approval_id}` | Approve a pending request (browser-only) |
+| POST | `/api/deny/{approval_id}` | Deny a pending request (browser-only) |
+| GET | `/api/history` | Past approvals (capped at 100) |
+| GET | `/api/terminal` | Agent terminal history |
+| GET | `/api/audit` | Audit log tail |
+| GET | `/api/tools` | Registered tool specs |
+| GET | `/blob/{blob_ref}` | Screenshot metadata |
+| GET | `/blob/{blob_ref}/raw` | Screenshot PNG bytes |
+| WS | `/ws` | Live terminal + pending updates |
+| GET | `/ui` | Browser dashboard |
 
 ## Stability promise (v0.1.0)
 
