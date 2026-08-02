@@ -79,6 +79,11 @@ DEFAULT_ALLOWLIST_PATTERNS: list[str] = [
     # Activity manager (read-only)
     r"^am list [a-zA-Z]+$",
 
+    # App launch via monkey (MIUI-friendly, count must be 1)
+    # monkey -p <package> 1 — launches the package's main activity
+    r"^monkey -p [a-zA-Z0-9._]+ 1$",
+    r"^monkey -p [a-zA-Z0-9._]+ -c [a-zA-Z.]+ 1$",
+
     # Storage inspection
     r"^mount$",
     r"^free( -[a-zA-Z]+)*$",

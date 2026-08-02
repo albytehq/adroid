@@ -19,11 +19,26 @@ import hashlib
 import re
 import shutil
 import subprocess
+import time
+import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from typing import Any
 
 from adroid.bridge.base import BlobStore
+from adroid.bridge.uiautomator_parser import parse_uiautomator_xml
 from adroid.contract.errors import BridgeError, DeviceNotAvailableError
 from adroid.contract.types import AppInfo, DeviceId, DeviceInfo, DeviceState, Screenshot
+from adroid.contract.ui import (
+    Bounds,
+    NodeRole,
+    SemanticNode,
+    Selector,
+    TapElementResult,
+    WaitConditionType,
+    WaitForCondition,
+    WaitForResult,
+    WorldState,
+)
 
 
 class AdbBridge:
@@ -118,21 +133,58 @@ class AdbBridge:
         )
 
     def launch_app(self, device_id: DeviceId, package_name: str) -> None:
+        """Launch an app by package name.
+
+        v0.2.0: MIUI-aware fallback chain. Tries 3 methods in order:
+          1. cmd package resolve-activity → am start -n (stock Android)
+          2. monkey -p <pkg> 1 (MIUI-friendly, works on most devices)
+          3. am start -a MAIN -c LAUNCHER -n <pkg>/<pkg>.MainActivity (last resort)
+
+        Raises BridgeError only if ALL three methods fail.
+        """
         serial = self._require_adb_serial(device_id)
-        # Resolve the launcher activity for the package, then start it.
-        raw = self._run_adb(
-            ["-s", serial, "shell", "cmd", "package", "resolve-activity", "--brief", package_name]
-        )
-        lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
-        # Last non-empty line is the resolved component (pkg/.Activity) or a path.
-        component = lines[-1] if lines else None
-        if not component or "/" not in component:
-            raise BridgeError(
-                f"could not resolve launcher activity for {package_name}",
-                code="adroid.bridge.no_launcher_activity",
-                details={"package_name": package_name},
+
+        # Method 1: resolve-activity + am start (stock Android)
+        try:
+            raw = self._run_adb(
+                ["-s", serial, "shell", "cmd", "package", "resolve-activity", "--brief", package_name]
             )
-        self._run_adb(["-s", serial, "shell", "am", "start", "-n", component])
+            lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+            # Last non-empty line is the resolved component (pkg/.Activity) or a path.
+            component = lines[-1] if lines else None
+            if component and "/" in component:
+                self._run_adb(["-s", serial, "shell", "am", "start", "-n", component])
+                return
+        except BridgeError:
+            pass  # fall through to method 2
+
+        # Method 2: monkey -p (MIUI-friendly)
+        try:
+            self._run_adb([
+                "-s", serial, "shell", "monkey", "-p", package_name, "1"
+            ])
+            return
+        except BridgeError:
+            pass  # fall through to method 3
+
+        # Method 3: am start with MAIN/LAUNCHER intent (last resort)
+        # Guess the activity name — usually <package>/<package>.MainActivity
+        # This rarely works but is worth trying.
+        try:
+            guessed_activity = f"{package_name}/{package_name}.MainActivity"
+            self._run_adb([
+                "-s", serial, "shell", "am", "start",
+                "-a", "android.intent.action.MAIN",
+                "-c", "android.intent.category.LAUNCHER",
+                "-n", guessed_activity,
+            ])
+            return
+        except BridgeError as exc:
+            raise BridgeError(
+                f"could not launch {package_name}: all 3 methods failed (resolve-activity, monkey, am start)",
+                code="adroid.bridge.launch_failed",
+                details={"package_name": package_name},
+            ) from exc
 
     def force_stop_app(self, device_id: DeviceId, package_name: str) -> None:
         serial = self._require_adb_serial(device_id)
@@ -170,7 +222,6 @@ class AdbBridge:
             4. Tap the center of the matched element's bounds
         """
         import time
-        import xml.etree.ElementTree as ET
 
         serial = self._require_adb_serial(device_id)
         start = time.monotonic()
@@ -375,6 +426,300 @@ class AdbBridge:
             return {"x": 0, "y": 0, "w": 0, "h": 0}
         x1, y1, x2, y2 = (int(g) for g in m.groups())
         return {"x": x1, "y": y1, "w": x2 - x1, "h": y2 - y1}
+
+    # ------------------------------------------------------------------
+    # v0.2.0 Semantic UI tools
+    # ------------------------------------------------------------------
+
+    # Cache: device_serial → (WorldState, timestamp). TTL = 2 seconds.
+    # Prevents redundant uiautomator dumps when agent does find+tap+wait
+    # in rapid succession.
+    _worldstate_cache: dict[str, tuple[WorldState, float]] = {}
+    _worldstate_cache_ttl: float = 2.0
+    _worldstate_revision_counter: int = 0
+
+    def ui_dump(self, device_id: DeviceId) -> WorldState:
+        """Dump UI hierarchy via `uiautomator dump` → parse to WorldState."""
+        serial = self._require_adb_serial(device_id)
+        start = time.monotonic()
+
+        # 1. Run uiautomator dump to /sdcard, then cat it back
+        dump_path = "/sdcard/adroid-ui-dump.xml"
+        self._run_adb(["-s", serial, "shell", "uiautomator", "dump", dump_path])
+        xml_raw = self._run_adb(["-s", serial, "shell", "cat", dump_path])
+        # Cleanup (non-fatal if fails)
+        try:
+            self._run_adb(["-s", serial, "shell", "rm", dump_path])
+        except BridgeError:
+            pass
+
+        # 2. Parse XML into SemanticNodes
+        nodes = parse_uiautomator_xml(xml_raw)
+
+        # 3. Detect foreground package + activity via dumpsys
+        fg_pkg = self._detect_foreground_package(serial)
+        activity = self._detect_current_activity(serial)
+
+        # 4. Detect keyboard visibility
+        keyboard_visible = self._detect_keyboard_visible(serial)
+
+        # 5. Detect screen dimensions from wm size
+        screen_dims = self._detect_screen_dimensions(serial)
+
+        # 6. Store raw XML in blob store for debugging
+        raw_xml_ref = self._blob_store.put(xml_raw.encode("utf-8")) if xml_raw else None
+
+        # 7. Build WorldState
+        AdbBridge._worldstate_revision_counter += 1
+        ws = WorldState(
+            revision=AdbBridge._worldstate_revision_counter,
+            timestamp=datetime.now(timezone.utc),
+            foreground_package=fg_pkg,
+            activity=activity,
+            nodes=tuple(nodes),
+            keyboard_visible=keyboard_visible,
+            screen_dimensions=screen_dims,
+            raw_xml_ref=raw_xml_ref,
+        )
+
+        # Cache it
+        AdbBridge._worldstate_cache[serial] = (ws, time.monotonic())
+
+        duration_ms = int((time.monotonic() - start) * 1000)
+        return ws
+
+    def _get_cached_worldstate(self, serial: str, max_age: float | None = None) -> WorldState | None:
+        """Return cached WorldState if fresh enough, else None."""
+        ttl = max_age if max_age is not None else self._worldstate_cache_ttl
+        cached = AdbBridge._worldstate_cache.get(serial)
+        if cached is None:
+            return None
+        ws, ts = cached
+        if time.monotonic() - ts > ttl:
+            return None
+        return ws
+
+    def ui_find_elements(
+        self,
+        device_id: DeviceId,
+        selector: Selector,
+    ) -> tuple[SemanticNode, ...]:
+        """Find nodes matching selector. Uses cache if fresh."""
+        serial = self._require_adb_serial(device_id)
+        ws = self._get_cached_worldstate(serial)
+        if ws is None:
+            ws = self.ui_dump(device_id)
+        return ws.find(selector)
+
+    def ui_tap_element(
+        self,
+        device_id: DeviceId,
+        selector: Selector,
+    ) -> TapElementResult:
+        """Find node by selector, tap center of its bounds."""
+        start = time.monotonic()
+        matches = self.ui_find_elements(device_id, selector)
+
+        if not matches:
+            return TapElementResult(
+                matched_nodes=0,
+                tapped=False,
+                selector_strategy="a11y",
+                duration_ms=int((time.monotonic() - start) * 1000),
+            )
+
+        # Pick per match strategy (find() already does this, but be explicit)
+        if selector.match == "last":
+            target = matches[-1]
+        elif selector.match == "best":
+            target = max(matches, key=lambda n: len(n.text or n.description or ""))
+        else:
+            target = matches[0]
+
+        cx, cy = target.bounds.center
+        self.tap(device_id, cx, cy)
+
+        return TapElementResult(
+            matched_nodes=len(matches),
+            tapped=True,
+            tapped_node=target,
+            tap_coordinates={"x": cx, "y": cy},
+            selector_strategy="a11y",
+            duration_ms=int((time.monotonic() - start) * 1000),
+        )
+
+    def ui_wait_for(
+        self,
+        device_id: DeviceId,
+        condition: WaitForCondition,
+    ) -> WaitForResult:
+        """Poll device until condition met or timeout."""
+        serial = self._require_adb_serial(device_id)
+        start = time.monotonic()
+        polls = 0
+        last_revision: int | None = None
+        last_matched_uuid: str | None = None
+        stable_count = 0
+        prev_node_hashes: set[str] | None = None
+
+        while True:
+            elapsed = time.monotonic() - start
+            if elapsed >= condition.timeout_seconds:
+                return WaitForResult(
+                    status="timeout",
+                    condition_type=condition.type,
+                    duration_seconds=elapsed,
+                    polls=polls,
+                    final_state_revision=last_revision,
+                    matched_node_uuid=last_matched_uuid,
+                )
+
+            # Force fresh dump (bypass cache) — wait_for needs real-time state
+            ws = self.ui_dump(device_id)
+            polls += 1
+            last_revision = ws.revision
+
+            # Check condition
+            satisfied = False
+
+            if condition.type == WaitConditionType.UI_STABLE:
+                # Hash all node texts+bounds+ids — if identical across stable_count
+                # consecutive polls, we're stable
+                current_hash = hash(tuple(
+                    (n.text, n.description, n.resource_id, n.bounds.x, n.bounds.y,
+                     n.bounds.w, n.bounds.h, n.clickable, n.focused)
+                    for n in ws.nodes
+                ))
+                if prev_node_hashes is None:
+                    prev_node_hashes = {current_hash}
+                    stable_count = 1
+                elif current_hash in prev_node_hashes:
+                    stable_count += 1
+                else:
+                    prev_node_hashes = {current_hash}
+                    stable_count = 1
+
+                if stable_count >= condition.stable_count:
+                    satisfied = True
+
+            elif condition.type == WaitConditionType.ELEMENT_APPEARS:
+                if condition.selector:
+                    matches = ws.find(condition.selector)
+                    if matches:
+                        satisfied = True
+                        last_matched_uuid = matches[0].uuid
+
+            elif condition.type == WaitConditionType.ELEMENT_DISAPPEARS:
+                if condition.selector:
+                    matches = ws.find(condition.selector)
+                    if not matches:
+                        satisfied = True
+
+            elif condition.type == WaitConditionType.TEXT_VISIBLE:
+                if condition.text:
+                    if any(n.text == condition.text for n in ws.nodes):
+                        satisfied = True
+                        last_matched_uuid = next(
+                            (n.uuid for n in ws.nodes if n.text == condition.text), None
+                        )
+
+            elif condition.type == WaitConditionType.TEXT_DISAPPEARS:
+                if condition.text:
+                    if not any(n.text == condition.text for n in ws.nodes):
+                        satisfied = True
+
+            elif condition.type == WaitConditionType.KEYBOARD_VISIBLE:
+                if ws.keyboard_visible:
+                    satisfied = True
+
+            elif condition.type == WaitConditionType.KEYBOARD_HIDDEN:
+                if not ws.keyboard_visible:
+                    satisfied = True
+
+            if satisfied:
+                return WaitForResult(
+                    status="satisfied",
+                    condition_type=condition.type,
+                    duration_seconds=time.monotonic() - start,
+                    polls=polls,
+                    final_state_revision=last_revision,
+                    matched_node_uuid=last_matched_uuid,
+                )
+
+            # Sleep before next poll
+            time.sleep(condition.poll_interval_seconds)
+
+    # ------------------------------------------------------------------
+    # Detection helpers for ui_dump
+    # ------------------------------------------------------------------
+
+    def _detect_foreground_package(self, serial: str) -> str | None:
+        """Detect current foreground app package via dumpsys activity."""
+        try:
+            raw = self._run_adb([
+                "-s", serial, "shell", "dumpsys", "activity", "activities"
+            ])
+            # Look for "mResumedActivity" or "topResumedActivity" line
+            for line in raw.splitlines():
+                line = line.strip()
+                if "mResumedActivity" in line or "topResumedActivity" in line:
+                    # Format: mResumedActivity=ActivityRecord{... u0 com.example.app/.MainActivity ...}
+                    parts = line.split()
+                    for part in parts:
+                        if "/" in part and "." in part:
+                            # com.example.app/.MainActivity
+                            pkg = part.split("/")[0]
+                            return pkg
+            return None
+        except BridgeError:
+            return None
+
+    def _detect_current_activity(self, serial: str) -> str | None:
+        """Detect current activity name via dumpsys activity."""
+        try:
+            raw = self._run_adb([
+                "-s", serial, "shell", "dumpsys", "activity", "activities"
+            ])
+            for line in raw.splitlines():
+                line = line.strip()
+                if "mResumedActivity" in line or "topResumedActivity" in line:
+                    parts = line.split()
+                    for part in parts:
+                        if "/" in part and "." in part:
+                            # com.example.app/.MainActivity → return .MainActivity
+                            slash_idx = part.find("/")
+                            if slash_idx >= 0:
+                                return part[slash_idx + 1:]
+            return None
+        except BridgeError:
+            return None
+
+    def _detect_keyboard_visible(self, serial: str) -> bool:
+        """Detect if soft keyboard is visible via dumpsys input_method."""
+        try:
+            raw = self._run_adb([
+                "-s", serial, "shell", "dumpsys", "input_method"
+            ])
+            # Look for mInputShown=true (verified working on Android 11+)
+            return "mInputShown=true" in raw
+        except BridgeError:
+            return False
+
+    def _detect_screen_dimensions(self, serial: str) -> dict[str, int]:
+        """Detect screen dimensions via wm size."""
+        try:
+            raw = self._run_adb(["-s", serial, "shell", "wm", "size"])
+            # Format: "Physical size: 1080x2340"
+            for line in raw.splitlines():
+                line = line.strip()
+                if "Physical size:" in line:
+                    size_str = line.split(":", 1)[1].strip()
+                    if "x" in size_str:
+                        w, h = size_str.split("x", 1)
+                        return {"width": int(w), "height": int(h)}
+            return {"width": 0, "height": 0}
+        except (BridgeError, ValueError):
+            return {"width": 0, "height": 0}
 
     def _adb_cmd(self, args: list[str]) -> list[str]:
         cmd = [self._adb_path]

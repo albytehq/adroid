@@ -362,6 +362,135 @@ PERMISSION_REQUEST_SPEC = ToolSpec(
 )
 
 
+# ---------------------------------------------------------------------------
+# v0.2.0 Semantic UI tools
+# ---------------------------------------------------------------------------
+
+
+UI_DUMP_SPEC = ToolSpec(
+    name="ui.dump",
+    capability=Capability.UI_DUMP,
+    required_scope=Scope.READ,
+    description="Dump the current UI hierarchy as a structured WorldState. Returns nodes with text, bounds, resource-id, clickable, etc. AI agents use this to reason about the screen without pixel coordinates.",
+    args_schema={
+        "type": "object",
+        "required": ["device_id"],
+        "properties": {
+            "device_id": {"type": "object", "required": ["kind", "value"]},
+        },
+        "additionalProperties": False,
+    },
+    result_schema={
+        "type": "object",
+        "required": ["world_state"],
+    },
+    stability="experimental",
+)
+
+UI_FIND_ELEMENTS_SPEC = ToolSpec(
+    name="ui.find_elements",
+    capability=Capability.UI_FIND_ELEMENTS,
+    required_scope=Scope.READ,
+    description="Query the latest WorldState for nodes matching a selector. Selector fields (text, text_contains, resource_id, description, class_name, clickable, etc) are AND-ed. match strategy: first|last|best|all.",
+    args_schema={
+        "type": "object",
+        "required": ["device_id", "selector"],
+        "properties": {
+            "device_id": {"type": "object", "required": ["kind", "value"]},
+            "selector": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "text_contains": {"type": "string"},
+                    "resource_id": {"type": "string"},
+                    "description": {"type": "string"},
+                    "class_name": {"type": "string"},
+                    "clickable": {"type": "boolean"},
+                    "scrollable": {"type": "boolean"},
+                    "editable": {"type": "boolean"},
+                    "match": {"type": "string", "enum": ["first", "last", "best", "all"], "default": "first"},
+                },
+            },
+        },
+        "additionalProperties": False,
+    },
+    result_schema={
+        "type": "object",
+        "required": ["elements"],
+    },
+    stability="experimental",
+)
+
+UI_TAP_ELEMENT_SPEC = ToolSpec(
+    name="ui.tap_element",
+    capability=Capability.UI_TAP_ELEMENT,
+    required_scope=Scope.ACT,
+    description="Find a node matching the selector and tap its center. Semantic tap — no pixel coordinates needed. Returns matched_nodes count, tapped status, and the tapped node's details.",
+    args_schema={
+        "type": "object",
+        "required": ["device_id", "selector"],
+        "properties": {
+            "device_id": {"type": "object", "required": ["kind", "value"]},
+            "selector": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "text_contains": {"type": "string"},
+                    "resource_id": {"type": "string"},
+                    "description": {"type": "string"},
+                    "class_name": {"type": "string"},
+                    "clickable": {"type": "boolean"},
+                    "match": {"type": "string", "enum": ["first", "last", "best", "all"], "default": "first"},
+                },
+            },
+        },
+        "additionalProperties": False,
+    },
+    result_schema={
+        "type": "object",
+        "required": ["matched_nodes", "tapped"],
+    },
+    stability="experimental",
+)
+
+UI_WAIT_FOR_SPEC = ToolSpec(
+    name="ui.wait_for",
+    capability=Capability.UI_WAIT_FOR,
+    required_scope=Scope.READ,
+    description="Poll the device until a condition is met or timeout. Conditions: ui_stable, element_appears, element_disappears, text_visible, text_disappears, keyboard_visible, keyboard_hidden. Returns status (satisfied|timeout) — does NOT raise on timeout.",
+    args_schema={
+        "type": "object",
+        "required": ["device_id", "condition"],
+        "properties": {
+            "device_id": {"type": "object", "required": ["kind", "value"]},
+            "condition": {
+                "type": "object",
+                "required": ["type"],
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "enum": ["ui_stable", "element_appears", "element_disappears",
+                                 "text_visible", "text_disappears",
+                                 "keyboard_visible", "keyboard_hidden"],
+                    },
+                    "selector": {"type": "object"},
+                    "text": {"type": "string"},
+                    "timeout_seconds": {"type": "number", "default": 10.0},
+                    "poll_interval_seconds": {"type": "number", "default": 0.5},
+                    "stable_count": {"type": "integer", "default": 2},
+                },
+            },
+        },
+        "additionalProperties": False,
+    },
+    result_schema={
+        "type": "object",
+        "required": ["status", "condition_type"],
+    },
+    stability="experimental",
+)
+
+
 _V0_TOOLS: list[ToolSpec] = [
     # Device observation
     DEVICE_LIST_SPEC,
@@ -381,6 +510,11 @@ _V0_TOOLS: list[ToolSpec] = [
     LOGS_READ_SPEC,
     # Permission meta-tool
     PERMISSION_REQUEST_SPEC,
+    # v0.2.0 Semantic UI tools
+    UI_DUMP_SPEC,
+    UI_FIND_ELEMENTS_SPEC,
+    UI_TAP_ELEMENT_SPEC,
+    UI_WAIT_FOR_SPEC,
 ]
 
 
@@ -774,6 +908,86 @@ class AdroidRuntime:
         }
         self._audit_call(token, spec, outcome=AuditOutcome.SUCCESS, args=args, extra_metadata={"scope": scope, "granted": True})
         return result
+
+    # ------------------------------------------------------------------
+    # v0.2.0 Semantic UI tools
+    # ------------------------------------------------------------------
+
+    def ui_dump(self, *, token: CapabilityToken, device_id: DeviceId) -> dict:
+        """Dump UI hierarchy → WorldState JSON."""
+        spec = self._require_tool("ui.dump")
+        self._gate.authorize(token, spec.capability, spec.required_scope)
+        args = {"device_id": str(device_id)}
+        try:
+            ws = self._bridge.ui_dump(device_id)
+        except AdroidError as exc:
+            self._audit_call(token, spec, outcome=AuditOutcome.ERROR, error_code=exc.code, args=args, device_id=device_id)
+            raise
+        except Exception as exc:
+            self._audit_call(token, spec, outcome=AuditOutcome.ERROR, error_code="adroid.unexpected", args=args, device_id=device_id, error=str(exc))
+            raise ContractError(f"unexpected bridge error: {exc}", code="adroid.unexpected") from exc
+        self._audit_call(token, spec, outcome=AuditOutcome.SUCCESS, args=args, device_id=device_id, extra_metadata={"node_count": ws.node_count})
+        return {"world_state": ws.model_dump(mode="json")}
+
+    def ui_find_elements(self, *, token: CapabilityToken, device_id: DeviceId, selector: dict) -> dict:
+        """Query WorldState for nodes matching selector."""
+        from adroid.contract.ui import Selector
+        spec = self._require_tool("ui.find_elements")
+        self._gate.authorize(token, spec.capability, spec.required_scope)
+        sel = Selector(**selector)
+        args = {"device_id": str(device_id), "selector": selector}
+        try:
+            elements = self._bridge.ui_find_elements(device_id, sel)
+        except AdroidError as exc:
+            self._audit_call(token, spec, outcome=AuditOutcome.ERROR, error_code=exc.code, args=args, device_id=device_id)
+            raise
+        except Exception as exc:
+            self._audit_call(token, spec, outcome=AuditOutcome.ERROR, error_code="adroid.unexpected", args=args, device_id=device_id, error=str(exc))
+            raise ContractError(f"unexpected bridge error: {exc}", code="adroid.unexpected") from exc
+        self._audit_call(token, spec, outcome=AuditOutcome.SUCCESS, args=args, device_id=device_id, extra_metadata={"matched": len(elements)})
+        return {"elements": [e.model_dump(mode="json") for e in elements]}
+
+    def ui_tap_element(self, *, token: CapabilityToken, device_id: DeviceId, selector: dict) -> dict:
+        """Find node by selector, tap its center."""
+        from adroid.contract.ui import Selector
+        spec = self._require_tool("ui.tap_element")
+        self._gate.authorize(token, spec.capability, spec.required_scope)
+        sel = Selector(**selector)
+        args = {"device_id": str(device_id), "selector": selector}
+        try:
+            result = self._bridge.ui_tap_element(device_id, sel)
+        except AdroidError as exc:
+            self._audit_call(token, spec, outcome=AuditOutcome.ERROR, error_code=exc.code, args=args, device_id=device_id)
+            raise
+        except Exception as exc:
+            self._audit_call(token, spec, outcome=AuditOutcome.ERROR, error_code="adroid.unexpected", args=args, device_id=device_id, error=str(exc))
+            raise ContractError(f"unexpected bridge error: {exc}", code="adroid.unexpected") from exc
+        self._audit_call(token, spec, outcome=AuditOutcome.SUCCESS, args=args, device_id=device_id, extra_metadata={"matched": result.matched_nodes, "tapped": result.tapped})
+        return result.model_dump(mode="json")
+
+    def ui_wait_for(self, *, token: CapabilityToken, device_id: DeviceId, condition: dict) -> dict:
+        """Poll device until condition met or timeout."""
+        from adroid.contract.ui import Selector, WaitForCondition
+        spec = self._require_tool("ui.wait_for")
+        self._gate.authorize(token, spec.capability, spec.required_scope)
+
+        # Build condition, converting selector dict to Selector object
+        cond_kwargs = dict(condition)
+        if "selector" in cond_kwargs and cond_kwargs["selector"] is not None:
+            cond_kwargs["selector"] = Selector(**cond_kwargs["selector"])
+        cond = WaitForCondition(**cond_kwargs)
+
+        args = {"device_id": str(device_id), "condition": condition}
+        try:
+            result = self._bridge.ui_wait_for(device_id, cond)
+        except AdroidError as exc:
+            self._audit_call(token, spec, outcome=AuditOutcome.ERROR, error_code=exc.code, args=args, device_id=device_id)
+            raise
+        except Exception as exc:
+            self._audit_call(token, spec, outcome=AuditOutcome.ERROR, error_code="adroid.unexpected", args=args, device_id=device_id, error=str(exc))
+            raise ContractError(f"unexpected bridge error: {exc}", code="adroid.unexpected") from exc
+        self._audit_call(token, spec, outcome=AuditOutcome.SUCCESS, args=args, device_id=device_id, extra_metadata={"status": result.status, "polls": result.polls})
+        return result.model_dump(mode="json")
 
     def get_blob(self, blob_ref: str) -> bytes | None:
         """Resolve a content-addressed reference to its bytes.

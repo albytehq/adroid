@@ -32,6 +32,17 @@ from adroid.contract.types import (
     ToolRegistry,
     ToolSpec,
 )
+from adroid.contract.ui import (
+    Bounds,
+    NodeRole,
+    SemanticNode,
+    Selector,
+    TapElementResult,
+    WaitConditionType,
+    WaitForCondition,
+    WaitForResult,
+    WorldState,
+)
 
 __all__ = [
     # Errors
@@ -47,17 +58,26 @@ __all__ = [
     "AuditOutcome",
     "Capability",
     "DeviceState",
+    "NodeRole",
     "PermissionScope",
     "Scope",
+    "WaitConditionType",
     # Value objects
     "AppInfo",
     "AuditEvent",
+    "Bounds",
     "CAPABILITY_TO_SCOPE",
     "CapabilityGrant",
     "CapabilityToken",
     "DeviceId",
     "DeviceInfo",
     "Screenshot",
+    "Selector",
+    "SemanticNode",
+    "TapElementResult",
+    "WaitForCondition",
+    "WaitForResult",
+    "WorldState",
     # Tool registry
     "ToolRegistry",
     "ToolSpec",

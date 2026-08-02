@@ -217,6 +217,11 @@ def _dispatch_tool(
         "logs.read": (Capability.LOGS_READ, Scope.READ),
         # v0.1.0 permission meta-tool
         "permission.request": (Capability.PERMISSION_REQUEST, Scope.READ),
+        # v0.2.0 Semantic UI tools
+        "ui.dump": (Capability.UI_DUMP, Scope.READ),
+        "ui.find_elements": (Capability.UI_FIND_ELEMENTS, Scope.READ),
+        "ui.tap_element": (Capability.UI_TAP_ELEMENT, Scope.ACT),
+        "ui.wait_for": (Capability.UI_WAIT_FOR, Scope.READ),
     }
 
     if tool not in tool_map:
@@ -354,6 +359,57 @@ def _dispatch_tool(
         terminal.append(
             kind="result",
             text=f"{tool} → ok (scope={args['scope']}, status={result['status']})",
+        )
+        return result
+
+    # v0.2.0 Semantic UI tools
+    if tool == "ui.dump":
+        did = DeviceId.model_validate(args["device_id"])
+        result = state.runtime.ui_dump(token=token, device_id=did)
+        ws = result["world_state"]
+        terminal.append(
+            kind="result",
+            text=f"{tool} → ok (revision={ws['revision']}, nodes={len(ws['nodes'])}, fg={ws.get('foreground_package','?')})",
+        )
+        return result
+
+    if tool == "ui.find_elements":
+        did = DeviceId.model_validate(args["device_id"])
+        result = state.runtime.ui_find_elements(
+            token=token, device_id=did, selector=args["selector"],
+        )
+        terminal.append(
+            kind="result",
+            text=f"{tool} → ok (matched={len(result['elements'])})",
+        )
+        return result
+
+    if tool == "ui.tap_element":
+        did = DeviceId.model_validate(args["device_id"])
+        result = state.runtime.ui_tap_element(
+            token=token, device_id=did, selector=args["selector"],
+        )
+        if result["tapped"]:
+            node = result.get("tapped_node", {})
+            terminal.append(
+                kind="result",
+                text=f"{tool} → ok (matched={result['matched_nodes']}, tapped text={node.get('text','?')!r} at {result.get('tap_coordinates')})",
+            )
+        else:
+            terminal.append(
+                kind="result",
+                text=f"{tool} → no match (matched=0, not tapped)",
+            )
+        return result
+
+    if tool == "ui.wait_for":
+        did = DeviceId.model_validate(args["device_id"])
+        result = state.runtime.ui_wait_for(
+            token=token, device_id=did, condition=args["condition"],
+        )
+        terminal.append(
+            kind="result",
+            text=f"{tool} → {result['status']} (polls={result['polls']}, {result['duration_seconds']:.1f}s)",
         )
         return result
 

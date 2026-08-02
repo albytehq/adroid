@@ -13,6 +13,7 @@ import hashlib
 import threading
 from collections import defaultdict
 from dataclasses import dataclass, field
+from typing import Any
 
 from adroid.bridge.base import BlobStore
 from adroid.contract.errors import DeviceNotAvailableError
@@ -28,6 +29,7 @@ class _MockDevice:
     last_swipe: tuple | None = None
     last_text: str | None = None
     last_key: str | None = None
+    last_worldstate: Any = None  # WorldState (typed as Any to avoid import cycle)
 
 
 class MockBridge:
@@ -208,6 +210,181 @@ class MockBridge:
             "truncated": False,
             "total_bytes": sum(len(l.encode("utf-8")) for l in fake_lines),
         }
+
+    # ------------------------------------------------------------------
+    # v0.2.0 Semantic UI tools (mock implementations)
+    # ------------------------------------------------------------------
+
+    def ui_dump(self, device_id: DeviceId) -> "WorldState":
+        """Mock ui_dump — returns a synthetic WorldState with a few nodes.
+
+        Useful for testing the runtime/gate/web layers without a real
+        device. The mock WorldState contains:
+          - A "Search" button at (936, 72) 72x72
+          - A "Sign in" button at (540, 1200) 200x80
+          - A "Username" EditText at (100, 500) 880x150
+        """
+        from datetime import datetime, timezone
+        from adroid.contract.ui import Bounds, NodeRole, SemanticNode, WorldState
+
+        self._require(device_id)
+
+        # Build synthetic nodes
+        search_btn = SemanticNode(
+            uuid="mock-search-btn",
+            role=NodeRole.BUTTON,
+            text="Search",
+            description="Search button",
+            resource_id="com.mock.app:id/search_btn",
+            class_name="android.widget.Button",
+            package="com.mock.app",
+            bounds=Bounds(x=936, y=72, w=72, h=72),
+            clickable=True,
+            enabled=True,
+            parent_uuid="mock-root",
+        )
+        signin_btn = SemanticNode(
+            uuid="mock-signin-btn",
+            role=NodeRole.BUTTON,
+            text="Sign in",
+            description="Sign in button",
+            resource_id="com.mock.app:id/signin_btn",
+            class_name="android.widget.Button",
+            package="com.mock.app",
+            bounds=Bounds(x=440, y=1180, w=200, h=80),
+            clickable=True,
+            enabled=True,
+            parent_uuid="mock-root",
+        )
+        username_field = SemanticNode(
+            uuid="mock-username-field",
+            role=NodeRole.EDIT_TEXT,
+            text="Username",
+            description="",
+            resource_id="com.mock.app:id/username",
+            class_name="android.widget.EditText",
+            package="com.mock.app",
+            bounds=Bounds(x=100, y=500, w=880, h=150),
+            clickable=True,
+            editable=True,
+            enabled=True,
+            focused=True,
+            parent_uuid="mock-root",
+        )
+        root = SemanticNode(
+            uuid="mock-root",
+            role=NodeRole.FRAME_LAYOUT,
+            text=None,
+            class_name="android.widget.FrameLayout",
+            package="com.mock.app",
+            bounds=Bounds(x=0, y=0, w=1080, h=2340),
+            clickable=False,
+            enabled=True,
+            children_uuids=("mock-search-btn", "mock-signin-btn", "mock-username-field"),
+        )
+
+        ws = WorldState(
+            revision=1,
+            timestamp=datetime.now(timezone.utc),
+            foreground_package="com.mock.app",
+            activity=".MainActivity",
+            nodes=(search_btn, signin_btn, username_field, root),
+            keyboard_visible=True,
+            screen_dimensions={"width": 1080, "height": 2340},
+            raw_xml_ref=None,
+        )
+
+        with self._lock:
+            d = self._devices[str(device_id)]
+            d.last_worldstate = ws
+
+        return ws
+
+    def ui_find_elements(
+        self,
+        device_id: DeviceId,
+        selector: "Selector",
+    ) -> tuple["SemanticNode", ...]:
+        """Mock ui_find_elements — uses last ui_dump result or triggers one."""
+        self._require(device_id)
+        with self._lock:
+            d = self._devices[str(device_id)]
+            ws = getattr(d, "last_worldstate", None)
+        if ws is None:
+            ws = self.ui_dump(device_id)
+        return ws.find(selector)
+
+    def ui_tap_element(
+        self,
+        device_id: DeviceId,
+        selector: "Selector",
+    ) -> "TapElementResult":
+        """Mock ui_tap_element — find + tap, record in mock state."""
+        import time as _time
+        from adroid.contract.ui import TapElementResult
+
+        self._require(device_id)
+        start = _time.monotonic()
+        matches = self.ui_find_elements(device_id, selector)
+
+        if not matches:
+            return TapElementResult(
+                matched_nodes=0,
+                tapped=False,
+                selector_strategy="a11y",
+                duration_ms=int((_time.monotonic() - start) * 1000),
+            )
+
+        if selector.match == "last":
+            target = matches[-1]
+        elif selector.match == "best":
+            target = max(matches, key=lambda n: len(n.text or n.description or ""))
+        else:
+            target = matches[0]
+
+        cx, cy = target.bounds.center
+        self.tap(device_id, cx, cy)
+
+        return TapElementResult(
+            matched_nodes=len(matches),
+            tapped=True,
+            tapped_node=target,
+            tap_coordinates={"x": cx, "y": cy},
+            selector_strategy="a11y",
+            duration_ms=int((_time.monotonic() - start) * 1000),
+        )
+
+    def ui_wait_for(
+        self,
+        device_id: DeviceId,
+        condition: "WaitForCondition",
+    ) -> "WaitForResult":
+        """Mock ui_wait_for — always satisfied immediately (no real polling)."""
+        import time as _time
+        from adroid.contract.ui import WaitForResult, WaitConditionType
+
+        self._require(device_id)
+        ws = self.ui_dump(device_id)
+
+        # Check condition to set matched_node_uuid if applicable
+        matched_uuid = None
+        if condition.type == WaitConditionType.ELEMENT_APPEARS and condition.selector:
+            matches = ws.find(condition.selector)
+            if matches:
+                matched_uuid = matches[0].uuid
+        elif condition.type == WaitConditionType.TEXT_VISIBLE and condition.text:
+            matched_uuid = next(
+                (n.uuid for n in ws.nodes if n.text == condition.text), None
+            )
+
+        return WaitForResult(
+            status="satisfied",
+            condition_type=condition.type,
+            duration_seconds=0.1,
+            polls=1,
+            final_state_revision=ws.revision,
+            matched_node_uuid=matched_uuid,
+        )
 
     # ------------------------------------------------------------------
     # Internals

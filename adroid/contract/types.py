@@ -63,6 +63,12 @@ class Capability(str, Enum):
     # Permission meta-tool (request a new scope mid-session)
     PERMISSION_REQUEST = "permission.request"
 
+    # v0.2.0 semantic UI tools
+    UI_DUMP = "ui.dump"
+    UI_TAP_ELEMENT = "ui.tap_element"
+    UI_WAIT_FOR = "ui.wait_for"
+    UI_FIND_ELEMENTS = "ui.find_elements"
+
     # Filesystem (sandboxed to package dirs)
     FS_READ = "fs.read"
     FS_WRITE = "fs.write"
@@ -109,6 +115,10 @@ CAPABILITY_TO_SCOPE: dict[Capability, PermissionScope] = {
     Capability.SHELL_EXEC: PermissionScope.SHELL_EXEC,
     Capability.LOGS_READ: PermissionScope.NOTIFICATIONS_READ,
     Capability.PERMISSION_REQUEST: PermissionScope.NONE,
+    Capability.UI_DUMP: PermissionScope.UI_INSPECT,
+    Capability.UI_TAP_ELEMENT: PermissionScope.TOUCH_CONTROL,
+    Capability.UI_WAIT_FOR: PermissionScope.UI_INSPECT,
+    Capability.UI_FIND_ELEMENTS: PermissionScope.UI_INSPECT,
     Capability.FS_READ: PermissionScope.SHELL_EXEC,
     Capability.FS_WRITE: PermissionScope.SHELL_EXEC,
     Capability.NET_OBSERVE: PermissionScope.OBSERVE,
