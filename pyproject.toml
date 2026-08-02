@@ -42,6 +42,7 @@ web = [
     "jinja2>=3.1,<4",
     "python-multipart>=0.0.9,<1",
 ]
+rust = ["adroid-rust>=0.3.5"]
 termux = []  # no extra deps; uses termux-api CLI via subprocess
 dev = [
     "pytest>=8.0",

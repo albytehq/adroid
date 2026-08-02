@@ -1,0 +1,17 @@
+[package]
+name = "adroid_rust"
+version = "0.3.5"
+edition = "2021"
+description = "Rust extensions for Adroid — fast uiautomator XML parser"
+
+[lib]
+name = "adroid_rust"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"] }
+quick-xml = "0.36"
+
+[profile.release]
+opt-level = 3
+lto = true
