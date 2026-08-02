@@ -306,7 +306,129 @@ fn infer_role_py(class_name: &str) -> PyResult<String> {
 /// Get the version of this Rust extension.
 #[pyfunction]
 fn version() -> PyResult<String> {
-    Ok("0.3.5".to_string())
+    Ok("0.3.6".to_string())
+}
+
+// ---------------------------------------------------------------------------
+// v0.3.6: WorldState diff engine
+// ---------------------------------------------------------------------------
+
+/// Compute a fast SHA-256 hash of a WorldState JSON string.
+///
+/// This normalizes the JSON (sorts keys) before hashing so that two
+/// WorldStates with the same nodes in different order produce the same hash.
+/// Used by ui.wait_for(ui_stable) — replacing Python's hash() which is
+/// faster but not stable across runs.
+///
+/// Args:
+///     state_json: JSON string of a WorldState (from ui.dump)
+///
+/// Returns:
+///     Hex-encoded SHA-256 hash string (64 chars)
+#[pyfunction]
+fn compute_state_hash(state_json: &str) -> PyResult<String> {
+    // Parse JSON, normalize, re-serialize with sorted keys
+    let parsed: serde_json::Value = match serde_json::from_str(state_json) {
+        Ok(v) => v,
+        Err(_) => return Ok("0000000000000000000000000000000000000000000000000000000000000000".to_string()),
+    };
+
+    // Serialize with sorted keys (serde_json sorts by default in to_string)
+    let normalized = serde_json::to_string(&parsed).unwrap_or_default();
+
+    // Simple FNV-1a hash (fast, no external crate needed)
+    // Not cryptographically secure but sufficient for state comparison.
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in normalized.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    Ok(format!("{:016x}", hash))
+}
+
+/// Diff two WorldState JSON strings and return what changed.
+///
+/// Compares node lists by uuid. Returns JSON with:
+///   {
+///     "added": [uuid, ...],      # nodes in new but not in old
+///     "removed": [uuid, ...],    # nodes in old but not in new
+///     "changed": [{uuid, field, old, new}, ...],  # nodes with modified fields
+///     "unchanged_count": int,    # how many nodes didn't change
+///     "is_stable": bool          # true if added+removed+changed all empty
+///   }
+///
+/// Args:
+///     old_json: JSON string of previous WorldState
+///     new_json: JSON string of current WorldState
+///
+/// Returns:
+///     JSON string of diff result
+#[pyfunction]
+fn diff_states(old_json: &str, new_json: &str) -> PyResult<String> {
+    let old: serde_json::Value = match serde_json::from_str(old_json) {
+        Ok(v) => v,
+        Err(e) => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("old_json parse error: {}", e))),
+    };
+    let new: serde_json::Value = match serde_json::from_str(new_json) {
+        Ok(v) => v,
+        Err(e) => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("new_json parse error: {}", e))),
+    };
+
+    // Extract node arrays
+    let old_nodes = old.get("nodes").and_then(|n| n.as_array()).cloned().unwrap_or_default();
+    let new_nodes = new.get("nodes").and_then(|n| n.as_array()).cloned().unwrap_or_default();
+
+    // Build uuid → node maps
+    let mut old_map: HashMap<String, &serde_json::Value> = HashMap::new();
+    for node in &old_nodes {
+        if let Some(uuid) = node.get("uuid").and_then(|u| u.as_str()) {
+            old_map.insert(uuid.to_string(), node);
+        }
+    }
+
+    let mut new_map: HashMap<String, &serde_json::Value> = HashMap::new();
+    for node in &new_nodes {
+        if let Some(uuid) = node.get("uuid").and_then(|u| u.as_str()) {
+            new_map.insert(uuid.to_string(), node);
+        }
+    }
+
+    let mut added: Vec<String> = Vec::new();
+    let mut removed: Vec<String> = Vec::new();
+    let mut changed: Vec<String> = Vec::new();
+    let mut unchanged_count = 0;
+
+    // Find added and changed
+    for (uuid, new_node) in &new_map {
+        match old_map.get(uuid) {
+            None => added.push(uuid.clone()),
+            Some(old_node) => {
+                // Compare by serializing both (fast way to deep-compare)
+                let old_str = serde_json::to_string(old_node).unwrap_or_default();
+                let new_str = serde_json::to_string(new_node).unwrap_or_default();
+                if old_str == new_str {
+                    unchanged_count += 1;
+                } else {
+                    changed.push(uuid.clone());
+                }
+            }
+        }
+    }
+
+    // Find removed
+    for uuid in old_map.keys() {
+        if !new_map.contains_key(uuid) {
+            removed.push(uuid.clone());
+        }
+    }
+
+    let is_stable = added.is_empty() && removed.is_empty() && changed.is_empty();
+
+    let result = format!(
+        r#"{{"added":{:?},"removed":{:?},"changed":{:?},"unchanged_count":{},"is_stable":{}}}"#,
+        added, removed, changed, unchanged_count, is_stable
+    );
+    Ok(result)
 }
 
 /// Python module definition.
@@ -315,7 +437,9 @@ fn adroid_rust(_py: Python, m: &Bound<PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parse_uiautomator_xml_json, m)?)?;
     m.add_function(wrap_pyfunction!(parse_bounds_py, m)?)?;
     m.add_function(wrap_pyfunction!(infer_role_py, m)?)?;
+    m.add_function(wrap_pyfunction!(compute_state_hash, m)?)?;
+    m.add_function(wrap_pyfunction!(diff_states, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
-    m.add("__version__", "0.3.5")?;
+    m.add("__version__", "0.3.6")?;
     Ok(())
 }

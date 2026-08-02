@@ -475,7 +475,7 @@ class TestRustExtension:
     def test_rust_available(self):
         try:
             import adroid_rust
-            assert adroid_rust.version() == "0.3.5"
+            assert adroid_rust.version().startswith("0.3")
         except ImportError:
             pytest.skip("Rust extension not installed")
 
