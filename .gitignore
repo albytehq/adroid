@@ -1,3 +1,10 @@
+# Rust build artifacts (NEVER commit — 45MB+ of binary cache)
+rust_ext/target/
+rust_ext/Cargo.lock
+rust_ext/*.so
+rust_ext/*.dylib
+rust_ext/*.dll
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
