@@ -36,7 +36,6 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, Response
-from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ValidationError
 
@@ -54,7 +53,7 @@ from adroid.runtime.core import AdroidRuntime
 log = logging.getLogger(__name__)
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
-_STATIC_DIR = Path(__file__).parent / "static"
+
 
 
 # ---------------------------------------------------------------------------
@@ -459,7 +458,7 @@ def create_app(
 
     app = FastAPI(title="Adroid Runtime", version="0.1.0", lifespan=lifespan)
     app.state.adroid = state
-    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
     templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
     # ------------------------------------------------------------------

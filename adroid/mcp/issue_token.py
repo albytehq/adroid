@@ -16,7 +16,7 @@ The first invocation also bootstraps the runtime's token-signing keypair
 file). Subsequent invocations reuse the existing keypair.
 
 For v0.1.0 we serialize the keypair to ``<audit_log>.tokenkey`` in PKCS8
-PEM. v0.2.0 will move to a real KMS integration.
+PEM.
 """
 
 from __future__ import annotations

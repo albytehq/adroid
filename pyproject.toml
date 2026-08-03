@@ -62,18 +62,9 @@ Issues = "https://github.com/albytehq/adroid/issues"
 [project.scripts]
 adroid = "adroid.cli.main:app"
 
-# Legacy entry points kept for backwards compat (will be removed in v0.2.0)
-adroid-start = "adroid.cli.start:start_main"
-adroid-pair = "adroid.cli.pair:pair_main"
-adroid-issue-token = "adroid.mcp.issue_token:main"
-adroid-mcp-server = "adroid.mcp.server:main"
-
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["adroid*"]
-
-[tool.setuptools.package-data]
-"adroid.web" = ["templates/*.html", "static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

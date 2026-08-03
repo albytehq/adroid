@@ -257,12 +257,8 @@ def start_cmd(
     )
 
 
-def start_main() -> None:
+if __name__ == "__main__":
     import typer as _typer
     _app = _typer.Typer()
     _app.command()(start_cmd)
     _app()
-
-
-if __name__ == "__main__":
-    start_main()

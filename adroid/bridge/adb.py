@@ -9,7 +9,7 @@ library, because:
     3. It is trivially mockable in tests by overriding ``_run_adb``.
 
 Trade-off: subprocess overhead (~5ms per call on Linux). For v0.1.0
-observation-heavy workloads this is fine. v0.2.0 will land a persistent
+observation-heavy workloads this is fine.
 ADB server connection for high-frequency polling.
 """
 
@@ -71,7 +71,7 @@ class AdbBridge:
                 details={"device_id": str(device_id)},
             )
         # Re-list and pick ours. Cheaper than a separate getprop round-trip
-        # for v0.1.0; v0.2.0 will cache per-serial getprop output.
+        # for v0.1.0;
         for d in self.list_devices():
             if d.id.value == device_id.value:
                 return d
@@ -194,7 +194,7 @@ class AdbBridge:
 
     def input_text(self, device_id: DeviceId, text: str) -> None:
         serial = self._require_adb_serial(device_id)
-        # Escape spaces — adb shell splits on whitespace. v0.2.0 will use
+        # Escape spaces — adb shell splits on whitespace.
         # `input text` with proper shell quoting via shlex.
         escaped = text.replace(" ", "%s")
         self._run_adb(["-s", serial, "shell", "input", "text", escaped])

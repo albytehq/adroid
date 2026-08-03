@@ -12,7 +12,7 @@ Fallback chain (default order, adjusted by ConfidenceTracker):
   4. text_contains          — substring match
   5. resource_id (suffix)   — short-form ID match
   6. class_name             — low specificity
-  7. bounds_only            — last resort (v0.4.0 will add vision)
+  7. bounds_only            — last resort
 
 If the original selector has text="Login" and it fails, the runtime
 automatically tries:

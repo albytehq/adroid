@@ -385,12 +385,5 @@ def tcpip_cmd(
     warn("      For Android 11+ phones, prefer 'adroid pair wireless' instead.")
 
 
-# Backwards-compat entry point used by old `adroid-pair` script
-def pair_main() -> None:
-    """Legacy entry point — preserved for backwards compat with the old
-    `adroid-pair` script. Delegates to the new Typer app."""
-    app()
-
-
 if __name__ == "__main__":
     app()

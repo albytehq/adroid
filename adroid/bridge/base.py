@@ -6,7 +6,7 @@ UIAutomator, accessibility service, Termux helper, future drivers that
 don't exist yet) is a swappable detail.
 
 v0.1.0 ships ``adb``, ``mock``, and ``termux`` implementations. v0.2.0
-will add ``emulator`` (qemu control surface) and v0.3.0 will add
+will add ``emulator`` (qemu control surface) and 
 ``remote`` (grpc-based for cross-network bridges).
 """
 
@@ -262,7 +262,7 @@ class DeviceBridge(Protocol):
 class BlobStore(Protocol):
     """Content-addressed store for binary artifacts (screenshots, etc.).
 
-    v0.1.0 ships a local-filesystem implementation. v0.2.0 will add an
+    v0.1.0 ships a local-filesystem implementation.
     S3-backed implementation. Both implement this Protocol.
     """
 

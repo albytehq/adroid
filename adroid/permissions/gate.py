@@ -50,7 +50,7 @@ class _Bucket:
 class RateLimiter:
     """Thread-safe in-memory rate limiter.
 
-    v0.1.0 limitation: state is per-process. v0.2.0 will move to a shared
+
     store (Redis) once we land multi-replica runtimes. The public API
     (``check_and_consume``) will not change.
     """

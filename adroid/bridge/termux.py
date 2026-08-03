@@ -21,7 +21,7 @@ Requirements on the phone:
 The bridge does NOT need root for read-only operations (screenshot, list
 packages, battery). Input injection (tap, text) typically requires root
 or a signed system app — v0.1.0 ships those methods but they may fail
-on most non-rooted devices. v0.2.0 will land an accessibility-service
+on most non-rooted devices.
 bridge for non-rooted input injection.
 """
 
@@ -151,7 +151,7 @@ class TermuxBridge:
     def tap(self, device_id: DeviceId, x: int, y: int) -> None:
         """Inject a tap. Likely fails on non-rooted devices — needs
         ``android.permission.INJECT_EVENTS`` which is system-app only.
-        v0.2.0 will use accessibility service for this.
+       
         """
         self._require_match(device_id)
         self._run(["input", "tap", str(x), str(y)])

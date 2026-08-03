@@ -918,7 +918,7 @@ class AdroidRuntime:
             "request_id": request_id,
             "status": "granted",  # v0.1.0: always granted (session has full access)
             "scope": scope,
-            "note": "v0.1.0: session pairing grants all scopes. v0.2.0+ will require explicit per-scope approval.",
+            "note": "Session pairing grants all scopes.",
         }
         self._audit_call(token, spec, outcome=AuditOutcome.SUCCESS, args=args, extra_metadata={"scope": scope, "granted": True})
         return result
@@ -1141,7 +1141,7 @@ class AdroidRuntime:
         error: str | None = None,
     ) -> None:
         """Write one audit event. NEVER raises — audit failures are logged
-        but never break a tool call. (v0.2.0 will add a strict mode.)"""
+        but never break a tool call. ()"""
         args_digest = hashlib.sha256(
             json.dumps(args, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
         ).hexdigest()

@@ -11,7 +11,7 @@ File format (one event per line, JSON Lines):
      "event_hash": "...", "signature": "...", "payload": { ... }}
     ...
 
-The file is fsync'd after every write. v0.2.0 will add S3/distributed
+The file is fsync'd after every write.
 backends; v0.1.0 ships local-file only, which is enough for single-node
 deployments and CI.
 """
@@ -150,7 +150,7 @@ class AuditWriter:
                 except (json.JSONDecodeError, KeyError, ValueError):
                     # Truncated line — likely a crash mid-write. Stop here;
                     # subsequent writes will overwrite from this point.
-                    # v0.2.0 will add a quarantine file for forensic review.
+                    #
                     break
         return (last_seq + 1, last_hash)
 
