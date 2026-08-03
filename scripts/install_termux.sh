@@ -9,7 +9,7 @@
 #
 # After running this script, start the runtime with:
 #
-#     adroid-start --bridge termux --port 7654
+#     adroid start --bridge termux --port 7654
 #
 # Then in another Termux session:
 #
@@ -85,7 +85,7 @@ echo
 echo "Next steps:"
 echo
 echo "  1. Start the Adroid runtime:"
-echo "       adroid-start --bridge termux --port 7654"
+echo "       adroid start --bridge termux --port 7654"
 echo
 echo "  2. In another Termux session, expose it to the internet:"
 echo "       cloudflared tunnel --url http://localhost:7654"

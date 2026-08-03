@@ -56,7 +56,7 @@ def main() -> None:
 
     proc = subprocess.Popen(
         [
-            sys.executable, "-m", "adroid.cli",
+            sys.executable, "-m", "adroid.cli.main", "start",
             "--bridge", "mock",
             "--port", "17660",
             "--audit-log", "/tmp/adroid-pairing-e2e.auditlog",
@@ -129,7 +129,7 @@ def main() -> None:
         print(f"  session_token grants count={len(body['session_token']['grants'])}")
         assert body["status"] == "approved"
         assert body["session_token"]["subject"] == "session:agent:e2e-test"
-        assert len(body["session_token"]["grants"]) == 12  # all capabilities
+        assert len(body["session_token"]["grants"]) == 21  # all capabilities
         session_token = body["session_token"]
         session_id = session_token["token_id"]
 

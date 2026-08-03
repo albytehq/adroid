@@ -457,7 +457,7 @@ def create_app(
         finally:
             task.cancel()
 
-    app = FastAPI(title="Adroid Runtime", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Adroid Runtime", version="0.3.6", lifespan=lifespan)
     app.state.adroid = state
 
     templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))

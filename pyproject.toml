@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "adroid"
-version = "0.1.0"
+version = "0.3.6"
 description = "Self-hosted, contract-governed runtime that gives AI agents a stable, audit-grade surface to observe, request, and act on Android devices."
 readme = "README.md"
 requires-python = ">=3.10"
