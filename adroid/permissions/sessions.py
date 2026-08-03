@@ -144,9 +144,9 @@ class SessionManager:
         """AI calls this to request a pairing. Returns the PairingRequest
         with status='pending'. The web layer turns the pairing_id into a
         URL the AI can share with the human."""
-        if not agent_id or len(agent_id) > 256:
+        if not agent_id or len(agent_id) > 120:
             raise AdroidError(
-                "agent_id must be 1-256 chars",
+                "agent_id must be 1-120 chars",
                 code="adroid.session.bad_agent_id",
             )
         with self._lock:

@@ -211,7 +211,7 @@ class AllowlistChecker:
 
         # Pattern match
         for pattern, compiled in zip(self._config.patterns, self._compiled, strict=True):
-            if compiled.match(cmd):
+            if compiled.fullmatch(cmd):
                 return AllowlistDecision(
                     allowed=True,
                     matched_pattern=pattern,

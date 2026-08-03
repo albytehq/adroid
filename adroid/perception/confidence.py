@@ -1,6 +1,6 @@
 """Confidence scoring for UI element matching.
 
-Heuristic scoring system (not ML — v0.3.0 scope is deterministic).
+Heuristic scoring system.
 Each selector strategy gets a base confidence score. The score is
 adjusted by the runtime based on historical success rate.
 
@@ -16,7 +16,7 @@ test automation literature, Selenium/Appium fallback patterns):
   class_name                  | 0.50       | Low specificity, many matches
   resource_id (suffix match)  | 0.75       | May match wrong element
   visible bounds only         | 0.30       | Last resort, fragile
-  vision (VLM)                | 0.20       | Reserved for v0.4.0
+  vision (VLM)                | 0.20       | Reserved for future use
 
 Historical adjustment:
   If a strategy has succeeded >5 times for the same app+action,
@@ -28,6 +28,7 @@ The final confidence is: base_score + historical_adjustment, clamped [0, 1].
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from enum import Enum
 
@@ -46,7 +47,7 @@ class SelectorStrategy(str, Enum):
     RESOURCE_ID_SUFFIX = "resource_id_suffix"  # Suffix match on resource_id
     CLASS_NAME = "class_name"            # Selector.class_name == node.class_name
     BOUNDS_ONLY = "bounds_only"          # No semantic match, just bounds
-    VISION = "vision"                    # VLM-based detection (v0.4.0)
+    VISION = "vision"                    # VLM-based detection (future)
 
 
 # Base confidence scores per strategy
@@ -105,7 +106,7 @@ class ConfidenceTracker:
     """Tracks per-strategy statistics and computes adjusted confidence.
 
     One instance per runtime. The tracker is in-memory only (not persisted)
-    for v0.3.0. v0.4.0+ may persist stats to skill_memory for cross-session
+    in-memory only. May persist to skill_memory for cross-session
     learning.
 
     Usage:
@@ -121,8 +122,8 @@ class ConfidenceTracker:
     """
 
     def __init__(self) -> None:
-        # Key: (app, action, strategy) → StrategyStats
         self._stats: dict[tuple[str, str, SelectorStrategy], StrategyStats] = {}
+        self._lock = threading.Lock()
 
     def get_confidence(
         self,
@@ -131,13 +132,10 @@ class ConfidenceTracker:
         app: str = "",
         action: str = "",
     ) -> float:
-        """Get adjusted confidence for a strategy.
-
-        Returns base_score + historical_adjustment, clamped [0, 1].
-        """
         base = BASE_SCORES.get(strategy, 0.3)
         key = (app, action, strategy)
-        stats = self._stats.get(key)
+        with self._lock:
+            stats = self._stats.get(key)
         if stats is None:
             return base
         adjusted = base + stats.adjustment
@@ -150,11 +148,11 @@ class ConfidenceTracker:
         app: str = "",
         action: str = "",
     ) -> StrategyStats:
-        """Get raw stats for a strategy (for inspection)."""
         key = (app, action, strategy)
-        if key not in self._stats:
-            self._stats[key] = StrategyStats()
-        return self._stats[key]
+        with self._lock:
+            if key not in self._stats:
+                self._stats[key] = StrategyStats()
+            return self._stats[key]
 
     def record_success(
         self,
@@ -163,11 +161,11 @@ class ConfidenceTracker:
         app: str = "",
         action: str = "",
     ) -> None:
-        """Record a successful match with this strategy."""
         key = (app, action, strategy)
-        if key not in self._stats:
-            self._stats[key] = StrategyStats()
-        self._stats[key].record_success()
+        with self._lock:
+            if key not in self._stats:
+                self._stats[key] = StrategyStats()
+            self._stats[key].record_success()
 
     def record_failure(
         self,
@@ -176,11 +174,11 @@ class ConfidenceTracker:
         app: str = "",
         action: str = "",
     ) -> None:
-        """Record a failed match with this strategy."""
         key = (app, action, strategy)
-        if key not in self._stats:
-            self._stats[key] = StrategyStats()
-        self._stats[key].record_failure()
+        with self._lock:
+            if key not in self._stats:
+                self._stats[key] = StrategyStats()
+            self._stats[key].record_failure()
 
     def get_fallback_order(
         self,
@@ -188,10 +186,6 @@ class ConfidenceTracker:
         app: str = "",
         action: str = "",
     ) -> list[SelectorStrategy]:
-        """Return strategies sorted by adjusted confidence (descending).
-
-        This is the order the self-healing selector tries them in.
-        """
         strategies = list(SelectorStrategy)
         scored = [
             (s, self.get_confidence(s, app=app, action=action))

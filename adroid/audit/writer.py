@@ -12,7 +12,7 @@ File format (one event per line, JSON Lines):
     ...
 
 The file is fsync'd after every write.
-backends; v0.1.0 ships local-file only, which is enough for single-node
+backends. Currently uses local-file only, suitable for single-node
 deployments and CI.
 """
 

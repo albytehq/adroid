@@ -51,7 +51,7 @@ class RateLimiter:
     """Thread-safe in-memory rate limiter.
 
 
-    store (Redis) once we land multi-replica runtimes. The public API
+    Uses in-memory state (single-process). The public API
     (``check_and_consume``) will not change.
     """
 

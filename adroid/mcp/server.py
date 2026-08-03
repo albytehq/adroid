@@ -13,7 +13,7 @@ Then run::
 The server reads a capability token from the ``ADROID_TOKEN`` environment
 variable (hex-encoded JSON of a signed CapabilityToken). Every tool call
 the server proxies through the runtime uses this token.
-per-session tokens issued via an MCP ``auth.issue`` tool.
+per-session tokens (planned).
 """
 
 from __future__ import annotations

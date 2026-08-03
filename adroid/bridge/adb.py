@@ -20,9 +20,11 @@ import json
 import re
 import shutil
 import subprocess
+import threading
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from adroid.bridge.base import BlobStore
 from adroid.bridge.uiautomator_parser import parse_uiautomator_xml
@@ -196,7 +198,9 @@ class AdbBridge:
         serial = self._require_adb_serial(device_id)
         # Escape spaces — adb shell splits on whitespace.
         # `input text` with proper shell quoting via shlex.
-        escaped = text.replace(" ", "%s")
+        # Escape for adb shell: replace spaces with %s and strip newlines
+        # (adb shell input text doesn't support newlines or shell metachars)
+        escaped = text.replace(" ", "%s").replace("\n", "").replace("\r", "")
         self._run_adb(["-s", serial, "shell", "input", "text", escaped])
 
     def press_key(self, device_id: DeviceId, keycode: str) -> None:
@@ -229,7 +233,7 @@ class AdbBridge:
 
         while attempts < max_scroll_attempts:
             # Dump UI hierarchy to /sdcard, then pull it
-            dump_path = "/sdcard/adroid-ui-dump.xml"
+            dump_path = f"/sdcard/adroid-ui-dump-{uuid4().hex[:8]}.xml"
             self._run_adb(["-s", serial, "shell", "uiautomator", "dump", dump_path])
             xml_raw = self._run_adb(["-s", serial, "shell", "cat", dump_path])
             # Cleanup
@@ -434,13 +438,14 @@ class AdbBridge:
     _worldstate_cache: dict[str, tuple[WorldState, float]] = {}
     _worldstate_cache_ttl: float = 2.0
     _worldstate_revision_counter: int = 0
+    _worldstate_lock: threading.Lock = threading.Lock()
 
     def ui_dump(self, device_id: DeviceId) -> WorldState:
         """Dump UI hierarchy via `uiautomator dump` → parse to WorldState."""
         serial = self._require_adb_serial(device_id)
 
         # 1. Run uiautomator dump to /sdcard, then cat it back
-        dump_path = "/sdcard/adroid-ui-dump.xml"
+        dump_path = f"/sdcard/adroid-ui-dump-{uuid4().hex[:8]}.xml"
         self._run_adb(["-s", serial, "shell", "uiautomator", "dump", dump_path])
         xml_raw = self._run_adb(["-s", serial, "shell", "cat", dump_path])
         # Cleanup (non-fatal if fails)
@@ -466,9 +471,11 @@ class AdbBridge:
         raw_xml_ref = self._blob_store.put(xml_raw.encode("utf-8")) if xml_raw else None
 
         # 7. Build WorldState
-        AdbBridge._worldstate_revision_counter += 1
+        with AdbBridge._worldstate_lock:
+            AdbBridge._worldstate_revision_counter += 1
+            rev = AdbBridge._worldstate_revision_counter
         ws = WorldState(
-            revision=AdbBridge._worldstate_revision_counter,
+            revision=rev,
             timestamp=datetime.now(timezone.utc),
             foreground_package=fg_pkg,
             activity=activity,
@@ -479,7 +486,8 @@ class AdbBridge:
         )
 
         # Cache it
-        AdbBridge._worldstate_cache[serial] = (ws, time.monotonic())
+        with AdbBridge._worldstate_lock:
+            AdbBridge._worldstate_cache[serial] = (ws, time.monotonic())
 
         return ws
 

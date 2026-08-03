@@ -42,7 +42,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -393,16 +393,10 @@ class WaitForCondition(_UIFrozen):
     For text_visible/text_disappears: text must be set (exact match).
     For keyboard_visible/keyboard_hidden: no extra fields needed.
     For ui_stable: stable_count controls how many consecutive identical
-        dumps are required (default 2 — i.e. dump, dump again, if
-        identical → stable).
-
-    poll_interval_seconds controls how often the runtime re-dumps the
-    UI tree. Default 0.5s — aggressive enough for responsiveness,
-    gentle enough to not overwhelm uiautomator (which takes 1-2s per
-    dump on real devices).
+        dumps are required (default 2).
 
     timeout_seconds is the hard limit. If exceeded, the wait returns
-    with status="timeout" (NOT an exception — agents should handle this).
+    with status="timeout" (NOT an exception — agents handle this).
     """
 
     type: WaitConditionType
@@ -411,6 +405,16 @@ class WaitForCondition(_UIFrozen):
     timeout_seconds: float = Field(default=10.0, gt=0.0, le=300.0)
     poll_interval_seconds: float = Field(default=0.5, gt=0.0, le=10.0)
     stable_count: int = Field(default=2, ge=2, le=10)
+
+    @model_validator(mode="after")
+    def _validate_condition_fields(self) -> "WaitForCondition":
+        if self.type in (WaitConditionType.ELEMENT_APPEARS, WaitConditionType.ELEMENT_DISAPPEARS):
+            if self.selector is None:
+                raise ValueError(f"selector must be set for {self.type.value}")
+        if self.type in (WaitConditionType.TEXT_VISIBLE, WaitConditionType.TEXT_DISAPPEARS):
+            if self.text is None:
+                raise ValueError(f"text must be set for {self.type.value}")
+        return self
 
 
 class WaitForResult(_UIFrozen):
@@ -431,10 +435,10 @@ class WaitForResult(_UIFrozen):
 
     status: str  # "satisfied" | "timeout"
     condition_type: WaitConditionType
-    duration_seconds: float
-    polls: int  # how many ui.dump calls were made
+    duration_seconds: float = Field(ge=0.0)
+    polls: int = Field(ge=0)
     final_state_revision: int | None = None
-    matched_node_uuid: str | None = None  # for element_appears/text_visible
+    matched_node_uuid: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -454,12 +458,12 @@ class TapElementResult(_UIFrozen):
     bounds for sanity check).
     """
 
-    matched_nodes: int
+    matched_nodes: int = Field(ge=0)
     tapped: bool
     tapped_node: SemanticNode | None = None
-    tap_coordinates: dict[str, int] | None = None  # {x, y}
-    selector_strategy: str = "a11y"  # which strategy found the node
-    duration_ms: int = 0
+    tap_coordinates: dict[str, int] | None = None
+    selector_strategy: str = "a11y"
+    duration_ms: int = Field(default=0, ge=0)
 
 
 __all__ = [

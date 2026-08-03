@@ -904,14 +904,14 @@ class AdroidRuntime:
         """Meta-tool: request an additional permission scope.
 
         v0.1.0 behavior: returns a request_id and a status of "granted"
-        (since session pairing already grants ALL scopes). v0.2.0+ will
+        (since session pairing already grants ALL scopes). 
         implement actual per-scope approval flow.
         """
         spec = self._require_tool("permission.request")
         self._gate.authorize(token, spec.capability, spec.required_scope)
         args = {"scope": scope, "reason": reason}
 
-        # v0.1.0: session pairing grants all scopes, so all requests are auto-granted
+        # session pairing grants all scopes, so all requests are auto-granted
         import uuid
         request_id = str(uuid.uuid4())
         result = {
@@ -1168,15 +1168,8 @@ class AdroidRuntime:
         )
         try:
             self._audit.write(event)
-        except AuditError as exc:
-            # Don't let audit failures break the call in v0.1.0. Log loudly.
-            log.error(
-                "audit write failed (outcome=%s, method=%s, error_code=%s): %s",
-                outcome.value,
-                event.method,
-                error_code,
-                exc,
-            )
+        except Exception as exc:
+            log.error("audit write failed (outcome=%s, method=%s): %s", outcome, event.method, exc)
 
     def _audit_boot(self) -> None:
         """Write a system boot event to the audit log. No token."""
@@ -1192,7 +1185,7 @@ class AdroidRuntime:
         )
         try:
             self._audit.write(event)
-        except AuditError as exc:
+        except Exception as exc:
             log.error("audit boot event failed: %s", exc)
 
 

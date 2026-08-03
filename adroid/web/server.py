@@ -233,8 +233,9 @@ def _dispatch_tool(
         scope=required_scope.value,
     )
 
-    # Standard token + scope check (rate limit etc.)
-    state.runtime._gate.authorize(token, capability, required_scope)  # noqa: SLF001
+    # Note: gate.authorize is called inside each runtime method (e.g.
+    # runtime.list_devices, runtime.ui_tap_element). We do NOT call it
+    # here to avoid double rate-limit consumption.
 
     if tool == "device.list":
         devices = state.runtime.list_devices(token=token)
@@ -612,13 +613,11 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"unknown pairing_id: {pairing_id}")
 
         if p.status == "approved" and p.session_token_json:
-            # AI gets the token ONCE. Subsequent polls still return it but
-            # we log that it was retrieved.
             token_obj = json.loads(p.session_token_json)
             return SessionStatusResponse(
                 status="approved",
                 session_token=token_obj,
-                expires_at=p.session_id,  # placeholder, replaced below
+                expires_at=token_obj.get("expires_at"),
                 decided_at=p.decided_at.isoformat() if p.decided_at else None,
                 decided_by=p.decided_by,
             )

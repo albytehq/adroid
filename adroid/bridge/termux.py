@@ -22,7 +22,7 @@ The bridge does NOT need root for read-only operations (screenshot, list
 packages, battery). Input injection (tap, text) typically requires root
 or a signed system app — v0.1.0 ships those methods but they may fail
 on most non-rooted devices.
-bridge for non-rooted input injection.
+bridge for non-rooted input injection (planned).
 """
 
 from __future__ import annotations

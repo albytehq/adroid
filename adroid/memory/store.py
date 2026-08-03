@@ -236,11 +236,14 @@ class MemoryStore:
             return {}
 
     def _save(self, filename: str, data: dict[str, MemoryEntry]) -> None:
-        """Save a memory file atomically."""
+        """Save a memory file atomically with fsync."""
         path = self._dir / filename
-        tmp = path.with_suffix(".tmp")
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
         serializable = {k: v.model_dump(mode="json") for k, v in data.items()}
-        tmp.write_text(json.dumps(serializable, indent=2, default=str), encoding="utf-8")
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(json.dumps(serializable, indent=2, default=str))
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, path)  # atomic on POSIX
 
 
