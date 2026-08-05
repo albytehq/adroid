@@ -310,3 +310,90 @@ def test_runtime_exports_public_keys_as_pem(runtime: AdroidRuntime):
     assert "BEGIN PUBLIC KEY" in audit_pem
     # Different keypairs
     assert token_pem != audit_pem
+
+
+# ---------------------------------------------------------------------------
+# v0.3.7: args_schema enforcement
+# ---------------------------------------------------------------------------
+
+
+def test_validate_args_rejects_out_of_range_x(runtime: AdroidRuntime):
+    """x=99999 should fail validation against max 8192."""
+    from adroid.contract.errors import ContractError
+    from adroid.runtime.core import INPUT_TAP_SPEC
+    with pytest.raises(ContractError) as exc_info:
+        runtime.validate_args(INPUT_TAP_SPEC, {
+            "device_id": {"kind": "adb", "value": "mock-1"},
+            "x": 99999,
+            "y": 100,
+        })
+    assert exc_info.value.code == "adroid.contract.schema_violation"
+    assert exc_info.value.details["arg"] == "x"
+    assert exc_info.value.details["maximum"] == 8192
+
+
+def test_validate_args_rejects_wrong_type(runtime: AdroidRuntime):
+    """x as string should fail type validation."""
+    from adroid.contract.errors import ContractError
+    from adroid.runtime.core import INPUT_TAP_SPEC
+    with pytest.raises(ContractError) as exc_info:
+        runtime.validate_args(INPUT_TAP_SPEC, {
+            "device_id": {"kind": "adb", "value": "mock-1"},
+            "x": "540",
+            "y": 100,
+        })
+    assert exc_info.value.code == "adroid.contract.schema_violation"
+    assert "must be integer" in str(exc_info.value)
+
+
+def test_validate_args_rejects_missing_required(runtime: AdroidRuntime):
+    """Missing required arg should fail with structured error."""
+    from adroid.contract.errors import ContractError
+    from adroid.runtime.core import INPUT_TAP_SPEC
+    with pytest.raises(ContractError) as exc_info:
+        runtime.validate_args(INPUT_TAP_SPEC, {
+            "device_id": {"kind": "adb", "value": "mock-1"},
+            "x": 540,
+            # y missing
+        })
+    assert exc_info.value.code == "adroid.contract.schema_violation"
+    assert "y" in exc_info.value.details["missing"]
+
+
+def test_validate_args_rejects_unknown_arg_when_strict(runtime: AdroidRuntime):
+    """additionalProperties: False should reject unknown args."""
+    from adroid.contract.errors import ContractError
+    from adroid.runtime.core import INPUT_TAP_SPEC
+    with pytest.raises(ContractError) as exc_info:
+        runtime.validate_args(INPUT_TAP_SPEC, {
+            "device_id": {"kind": "adb", "value": "mock-1"},
+            "x": 540,
+            "y": 100,
+            "unexpected": "should fail",
+        })
+    assert exc_info.value.code == "adroid.contract.schema_violation"
+    assert exc_info.value.details["unknown_arg"] == "unexpected"
+
+
+def test_validate_args_accepts_valid_input(runtime: AdroidRuntime):
+    """Valid args should pass validation without raising."""
+    from adroid.runtime.core import INPUT_TAP_SPEC
+    runtime.validate_args(INPUT_TAP_SPEC, {
+        "device_id": {"kind": "adb", "value": "mock-1"},
+        "x": 540,
+        "y": 1200,
+    })  # should not raise
+
+
+def test_validate_args_skips_permissive_schema(runtime: AdroidRuntime):
+    """Tools with additionalProperties: True or no constraints should skip validation."""
+    from adroid.contract.types import Capability, Scope, ToolSpec
+    permissive_spec = ToolSpec(
+        name="test.permissive",
+        capability=Capability.DEVICE_LIST,
+        required_scope=Scope.READ,
+        description="test",
+        args_schema={"type": "object"},  # no constraints
+        result_schema={"type": "object"},
+    )
+    runtime.validate_args(permissive_spec, {"anything": "goes"})  # should not raise

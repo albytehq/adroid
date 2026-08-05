@@ -42,7 +42,7 @@ web = [
     "jinja2>=3.1,<4",
     "python-multipart>=0.0.9,<1",
 ]
-rust = ["adroid-rust>=0.3.5"]
+rust = ["adroid-rust>=0.3.6"]
 termux = []  # no extra deps; uses termux-api CLI via subprocess
 dev = [
     "pytest>=8.0",
@@ -51,6 +51,7 @@ dev = [
     "ruff>=0.4",
     "mypy>=1.10",
     "httpx>=0.27",  # for testing WebServer
+    "requests>=2.31",  # for scripts/e2e_test.py
 ]
 
 [project.urls]

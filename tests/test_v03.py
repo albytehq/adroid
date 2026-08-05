@@ -228,6 +228,10 @@ class TestSelfHealingSelector:
 
 @pytest.fixture
 def web_setup_v03():
+    # Delete any stale audit log so signature verification works on fresh chain.
+    audit_path = Path("/tmp/adroid-test-v03.auditlog")
+    if audit_path.exists():
+        audit_path.unlink()
     blob_store = InMemoryBlobStore()
     bridge = MockBridge(blob_store=blob_store)
     bridge.add_device(
@@ -241,7 +245,7 @@ def web_setup_v03():
         issuer_id="adroid-v03-test",
         bridge=bridge,
         blob_store=blob_store,
-        audit_log_path=Path("/tmp/adroid-test-v03.auditlog"),
+        audit_log_path=audit_path,
     )
     issuer = TokenIssuer(
         issuer_id=runtime.issuer_id,
@@ -259,6 +263,8 @@ def web_setup_v03():
         browser_session_id="test-browser",
     )
     client = TestClient(app)
+    # Hit /ui first to set the browser-session cookie for /api/* auth.
+    client.get("/ui")
     res = client.post("/agent/session/request", json={
         "bootstrap_token": bootstrap_token.model_dump(mode="json"),
         "agent_id": "agent:v03-test",

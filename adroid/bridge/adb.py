@@ -85,12 +85,14 @@ class AdbBridge:
 
     def list_installed_apps(self, device_id: DeviceId) -> list[AppInfo]:
         serial = self._require_adb_serial(device_id)
-        raw = self._run_adb(["-s", serial, "shell", "pm", "list", "packages", "-s", "-3"])
-        # -s = system apps only would be wrong; we want both. Use -3 (third-party)
-        # plus a separate call for system apps. For v0.1.0 simplicity we list ALL
-        # packages via `pm list packages` (no flag).
-        raw = self._run_adb(["-s", serial, "shell", "pm", "list", "packages"])
-        return self._parse_packages_output(raw, system_flag=False)
+        # Two queries: -s (system only) and -3 (third-party only). Correctly
+        # sets system_app flag per AppInfo instead of marking everything as user.
+        sys_raw = self._run_adb(["-s", serial, "shell", "pm", "list", "packages", "-s"])
+        user_raw = self._run_adb(["-s", serial, "shell", "pm", "list", "packages", "-3"])
+        return (
+            self._parse_packages_output(sys_raw, system_flag=True)
+            + self._parse_packages_output(user_raw, system_flag=False)
+        )
 
     def capture_screenshot(self, device_id: DeviceId) -> Screenshot:
         serial = self._require_adb_serial(device_id)
@@ -195,16 +197,30 @@ class AdbBridge:
         self._run_adb(["-s", serial, "shell", "input", "tap", str(x), str(y)])
 
     def input_text(self, device_id: DeviceId, text: str) -> None:
+        import shlex
         serial = self._require_adb_serial(device_id)
-        # Escape spaces — adb shell splits on whitespace.
-        # `input text` with proper shell quoting via shlex.
-        # Escape for adb shell: replace spaces with %s and strip newlines
-        # (adb shell input text doesn't support newlines or shell metachars)
-        escaped = text.replace(" ", "%s").replace("\n", "").replace("\r", "")
-        self._run_adb(["-s", serial, "shell", "input", "text", escaped])
+        # adb shell joins args post-`shell` into one sh -c string on the device.
+        # Reject newlines/tabs (adb input text doesn't support them) and use
+        # shlex.quote to neutralize shell metacharacters (;, |, &, $(), etc.).
+        if any(c in text for c in ("\n", "\r", "\t")):
+            raise BridgeError(
+                "input_text does not support newlines or tabs",
+                code="adroid.bridge.input_text_unsupported",
+                details={"text_length": len(text)},
+            )
+        escaped = text.replace(" ", "%s")
+        self._run_adb(["-s", serial, "shell", "input", "text", shlex.quote(escaped)])
 
     def press_key(self, device_id: DeviceId, keycode: str) -> None:
+        import re
         serial = self._require_adb_serial(device_id)
+        # Validate KEYCODE_* format to prevent shell injection via keyevent.
+        if not re.fullmatch(r"KEYCODE_[A-Z][A-Z0-9_]*", keycode):
+            raise BridgeError(
+                f"invalid keycode: {keycode!r}",
+                code="adroid.bridge.invalid_keycode",
+                details={"keycode": keycode},
+            )
         self._run_adb(["-s", serial, "shell", "input", "keyevent", keycode])
 
     def tap_text(
@@ -254,10 +270,8 @@ class AdbBridge:
                     target = matches[0]
 
                 bounds = target["bounds"]
-                cx = (bounds["x"] + bounds["w"] // 2) + bounds["x"]
-                cy = (bounds["y"] + bounds["h"] // 2) + bounds["y"]
-                # Actually bounds in uiautomator XML is [x1,y1][x2,y2]
-                # We stored x,y,w,h — let's fix the center calc:
+                # uiautomator XML stores [x1,y1][x2,y2]; we parse to x,y,w,h.
+                # Center is x + w/2, y + h/2.
                 cx = bounds["x"] + bounds["w"] // 2
                 cy = bounds["y"] + bounds["h"] // 2
 
@@ -871,15 +885,27 @@ class LocalBlobStore:
         self._root.mkdir(parents=True, exist_ok=True)
 
     def put(self, data: bytes) -> str:
-        import os
+        import os, uuid
         digest = hashlib.sha256(data).hexdigest()
         shard = self._root / digest[:2] / digest[2:4]
         shard.mkdir(parents=True, exist_ok=True)
         path = shard / digest
         if not path.exists():
-            tmp = path.with_suffix(".tmp")
-            tmp.write_bytes(data)
-            os.replace(tmp, path)  # atomic on POSIX
+            # Unique tmp name prevents collision across concurrent writers.
+            tmp = path.with_name(f".{digest}.{uuid.uuid4().hex}.tmp")
+            try:
+                with open(tmp, "wb") as f:
+                    f.write(data)
+                    f.flush()
+                    os.fsync(f.fileno())  # durability for data
+                os.replace(tmp, path)  # atomic publish
+                _fsync_dir(shard)  # durability for dirent
+            except OSError:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
         return digest
 
     def get(self, blob_ref: str) -> bytes | None:
@@ -891,3 +917,17 @@ class LocalBlobStore:
     def exists(self, blob_ref: str) -> bool:
         path = self._root / blob_ref[:2] / blob_ref[2:4] / blob_ref
         return path.exists()
+
+
+def _fsync_dir(path) -> None:
+    """fsync the directory to durably commit a file rename/creation in it."""
+    import os
+    try:
+        fd = os.open(str(path), os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        # Some filesystems (tmpfs, network FS) don't support dir fsync. Tolerate.
+        pass

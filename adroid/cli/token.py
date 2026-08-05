@@ -8,7 +8,7 @@ from pathlib import Path
 import typer
 from rich.table import Table
 
-from adroid.cli.utils import die, header, console
+from adroid.cli.utils import die, header, console, print_stdout
 
 app = typer.Typer(
     name="token",
@@ -98,11 +98,10 @@ def issue_cmd(
 
     header("Issued Token", f"Subject: {subject} · TTL: {ttl}s · Grants: {len(grants)}")
 
-    # Print token JSON to stdout (so it can be piped)
-    console.print(token.model_dump_json())
-    console.print()
+    # Print raw token JSON to stdout (machine-readable; pipeable to jq)
+    print_stdout(token.model_dump_json())
 
-    # Print summary table
+    # Summary table to stderr (human-readable)
     table = Table(show_header=True, header_style="bold cyan")
     table.add_column("Capability", style="white")
     table.add_column("Scope", style="white")
@@ -112,8 +111,10 @@ def issue_cmd(
 
     if print_env:
         hex_token = token.model_dump_json().encode("utf-8").hex()
-        console.print("\n[dim]Source this with:[/dim]", file=sys.stderr)
-        console.print(f'[cyan]export ADROID_TOKEN="{hex_token}"[/cyan]', file=sys.stderr)
+        # console is already stderr-bound (utils.py:59); drop the file= kwarg
+        # which Rich.Console.print does not accept.
+        console.print("\n[dim]Source this with:[/dim]")
+        console.print(f'[cyan]export ADROID_TOKEN="{hex_token}"[/cyan]')
 
 
 @app.command("inspect")

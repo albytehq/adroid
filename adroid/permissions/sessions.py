@@ -291,7 +291,14 @@ class SessionManager:
     # ------------------------------------------------------------------
 
     def cleanup_expired(self) -> int:
-        """Remove expired sessions from the active list. Returns count removed."""
+        """Revoke expired sessions and prune them from active dicts.
+
+        Marks sessions revoked (so is_revoked() keeps returning True for the
+        token_id) AND deletes the Session object from _sessions /
+        _token_to_session — without this, long-running runtimes accumulate
+        every session ever paired forever, causing O(n) scans under the lock
+        on every request_pairing.
+        """
         with self._lock:
             now = datetime.now(timezone.utc)
             removed = 0
@@ -300,5 +307,10 @@ class SessionManager:
                     s.revoked = True
                     s.revoked_at = now
                     self._revoked_token_ids.add(s.token_id)
+                    # Prune from active dicts to bound memory growth.
+                    # _revoked_token_ids retains the token_id so the gate's
+                    # revocation check still rejects future calls.
+                    self._sessions.pop(s.session_id, None)
+                    self._token_to_session.pop(s.token_id, None)
                     removed += 1
             return removed

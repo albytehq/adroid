@@ -313,31 +313,40 @@ fn version() -> PyResult<String> {
 // v0.3.6: WorldState diff engine
 // ---------------------------------------------------------------------------
 
-/// Compute a fast SHA-256 hash of a WorldState JSON string.
+/// Compute a fast FNV-1a 64-bit hash of a WorldState JSON string.
 ///
-/// This normalizes the JSON (sorts keys) before hashing so that two
-/// WorldStates with the same nodes in different order produce the same hash.
-/// Used by ui.wait_for(ui_stable) — replacing Python's hash() which is
-/// faster but not stable across runs.
+/// Normalizes JSON (sorts keys via serde_json's BTreeMap) before hashing
+/// so two WorldStates with the same nodes in different insertion order
+/// produce the same hash. Used by ui.wait_for(ui_stable) for cheap state
+/// comparison across polls.
+///
+/// NOT cryptographically secure — do not use for tamper detection.
+/// The audit log uses Ed25519 signatures for tamper-evidence instead.
 ///
 /// Args:
 ///     state_json: JSON string of a WorldState (from ui.dump)
 ///
 /// Returns:
-///     Hex-encoded SHA-256 hash string (64 chars)
+///     16-char hex string (64-bit FNV-1a hash)
 #[pyfunction]
 fn compute_state_hash(state_json: &str) -> PyResult<String> {
-    // Parse JSON, normalize, re-serialize with sorted keys
+    // Parse JSON. On parse error, raise PyValueError so callers can
+    // distinguish "bad input" from "stable state" — never silently
+    // return a collision-prone all-zeros hash.
     let parsed: serde_json::Value = match serde_json::from_str(state_json) {
         Ok(v) => v,
-        Err(_) => return Ok("0000000000000000000000000000000000000000000000000000000000000000".to_string()),
+        Err(e) => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "state_json parse error: {}",
+                e
+            )))
+        }
     };
 
-    // Serialize with sorted keys (serde_json sorts by default in to_string)
+    // Serialize with sorted keys (serde_json::Value is BTreeMap-backed for objects)
     let normalized = serde_json::to_string(&parsed).unwrap_or_default();
 
-    // Simple FNV-1a hash (fast, no external crate needed)
-    // Not cryptographically secure but sufficient for state comparison.
+    // FNV-1a 64-bit hash — fast, no external crate needed.
     let mut hash: u64 = 0xcbf29ce484222325;
     for byte in normalized.bytes() {
         hash ^= byte as u64;

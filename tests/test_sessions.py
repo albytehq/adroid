@@ -201,3 +201,38 @@ def test_get_session_by_token(manager):
     s = manager.get_session_by_token(token_id)
     assert s is not None
     assert s.agent_id == "a"
+
+
+# ---------------------------------------------------------------------------
+# v0.3.7: cleanup_expired should prune session dicts (memory leak fix)
+# ---------------------------------------------------------------------------
+
+
+def test_cleanup_expired_prunes_session_dicts(manager):
+    """cleanup_expired should remove Session objects from _sessions.
+
+    Previously it only flipped revoked=True — leaving the Session object
+    in the dict forever, causing O(n) scans on every request_pairing
+    and unbounded memory growth in long-running runtimes.
+    """
+    from datetime import datetime, timedelta, timezone
+    from uuid import UUID
+    p = manager.request_pairing(agent_id="a")
+    manager.approve_pairing(pairing_id=p.pairing_id, ttl_seconds=3600, approver="b")
+    # session_id == token_id (hex string), per sessions.py:78
+    session_id = p.session_id
+    token_id = UUID(session_id)
+    # Pre-check: session is in the dict
+    assert session_id in manager._sessions
+    assert token_id in manager._token_to_session
+    # Manually expire it
+    with manager._lock:
+        s = manager._sessions[session_id]
+        s.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    removed = manager.cleanup_expired()
+    assert removed == 1
+    # Post-check: Session object pruned from dict
+    assert session_id not in manager._sessions
+    assert token_id not in manager._token_to_session
+    # But the token_id is still in the revoked set so is_revoked returns True
+    assert manager.is_revoked(token_id) is True

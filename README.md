@@ -5,7 +5,7 @@
 > with **one-time pairing** so the device owner approves the AI once,
 > then it has full access until they disconnect.
 
-**Status:** v0.1.0 MVP · **License:** Apache-2.0 · **Python:** ≥3.10
+**Status:** v0.3.6 · **License:** Apache-2.0 · **Python:** ≥3.10
 
 Adroid is not a wrapper around ADB. It is a runtime that owns the contract
 and treats drivers as replaceable details. The public API survives swaps
@@ -17,11 +17,11 @@ per-action approval friction. Every call is signed-audited and live-streamed
 to a browser dashboard so the human always sees what the AI is doing.
 Click Disconnect anytime to instantly revoke.
 
-## What's in v0.1.0
+## What's in v0.3.6
 
 - ✅ Typed contract layer (Pydantic v2)
 - ✅ Capability-scoped tokens (Ed25519-signed)
-- ✅ Permission gate with per-tool rate limiting
+- ✅ Permission gate with per-tool rate limiting + revocation check
 - ✅ Append-only, hash-chained, Ed25519-signed audit log
 - ✅ Abstract `DeviceBridge` Protocol + ADB + Mock + Termux implementations
 - ✅ Runtime orchestrator that ties it all together
@@ -147,17 +147,17 @@ Three ways to connect your phone to the laptop:
 2. Tap **Pair device with pairing code** — phone shows `IP:port` and a 6-digit code
 3. On the laptop:
    ```bash
-   adroid-pair --pair 192.168.1.42:4321 --code 123456
+   adroid pair wireless --ip 192.168.1.42 --port 4321 --code 123456
    # Then connect (pairing port ≠ connect port — see phone's main wireless debugging screen for IP:port)
-   adroid-pair --connect 192.168.1.42:5555
+   adroid pair connect 192.168.1.42:5555
    ```
 4. Tap **Allow** on the phone's debugging prompt (one-time)
 
 #### Option B: USB cable (classic, works on all Android versions)
 
 ```bash
-adroid-pair --list                    # see connected devices
-adroid-pair                           # auto-verify the first device
+adroid pair list                    # see connected devices
+adroid pair verify                  # auto-pick first device
 ```
 
 Plug in USB cable → tap **Allow** on phone's "Allow USB debugging?" prompt.
@@ -167,7 +167,7 @@ Plug in USB cable → tap **Allow** on phone's "Allow USB debugging?" prompt.
 One-time USB cable to enable tcpip mode, then wireless forever after:
 
 ```bash
-adroid-pair --wireless-setup 192.168.1.42
+adroid pair tcpip 192.168.1.42      # Android < 11 only
 # Follow the prompts:
 #   1. Plug in USB cable → press Enter
 #   2. adroid runs `adb tcpip 5555` on the phone
@@ -181,14 +181,14 @@ For Android 11+, prefer Option A — it survives reboots.
 #### Verify the phone is ready (any option)
 
 ```bash
-adroid-pair --verify                  # auto-pick first device
-adroid-pair --verify 192.168.1.42:5555  # specific serial
+adroid pair verify                  # auto-pick first device
+adroid pair verify 192.168.1.42:5555  # specific serial
 ```
 
 ### Step 2: Start the runtime
 
 ```bash
-adroid-start --bridge adb --port 7654
+adroid start --bridge adb --port 7654
 ```
 
 The runtime prints a **bootstrap token** (30-day TTL, no grants — only
@@ -241,7 +241,7 @@ No per-action approval. The AI has full access until TTL expires or you disconne
 ### Mode: Mock (no phone needed — for dev / demo)
 
 ```bash
-adroid-start --bridge mock --port 7654
+adroid start --bridge mock --port 7654
 ```
 
 Same flow, but the "phone" is a mock in memory. Useful for testing the
@@ -351,9 +351,9 @@ The AI should detect this and request a new pairing.
 | WS | `/ws` | Live terminal + state updates |
 | GET | `/ui` | Browser dashboard |
 
-## Stability promise (v0.1.0)
+## Stability promise (v0.3.6)
 
-Once v0.1.0 ships, the following are frozen until v1.0.0:
+Once v0.3.6 ships, the following are frozen until v1.0.0:
 
 - **Capability enum values** (`device.list`, `device.observe`, etc.)
 - **Scope enum values** (`read`, `act`, `admin`)
@@ -361,7 +361,7 @@ Once v0.1.0 ships, the following are frozen until v1.0.0:
 - **Audit hash + signature domains** (`adroid.audit.v1`, `adroid.audit.sig.v1`)
 - **CapabilityToken canonical serialization** — byte-stable JSON shape
 - **ToolSpec names + required args schema** for tools marked `stability="stable"`
-- **Agent API endpoints** (`POST /agent/call`, `GET /api/pending`, `POST /api/approve/{id}`, etc.)
+- **Agent API endpoints** (`POST /agent/call`, `POST /agent/session/request`, `GET /agent/session/{pairing_id}`, `POST /api/pair/{id}/approve`, `POST /api/pair/{id}/deny`, `POST /api/session/{id}/disconnect`)
 
 Adding new capabilities, scopes, tools, or endpoints is allowed in any
 minor release. Removing or renaming is a major-release event.
@@ -378,11 +378,11 @@ adroid/
 │   ├── runtime/         # Orchestrator
 │   ├── web/             # FastAPI server: permission UI + agent API + WebSocket
 │   ├── mcp/             # Optional MCP server layer
-│   └── cli.py           # `adroid-start` entrypoint
+│   └── cli/             # `adroid` entrypoint (Typer app + subcommands)
 ├── scripts/
 │   ├── install_termux.sh  # Phone bootstrap
 │   └── e2e_test.py        # End-to-end integration test
-├── tests/               # 101 passing tests across 7 modules
+├── tests/               # 314 passing tests across 13 modules
 ├── examples/            # Runnable end-to-end demo
 └── pyproject.toml
 ```
@@ -391,15 +391,18 @@ adroid/
 
 | Version  | Months | Theme                | Key deliverables                                |
 |----------|--------|----------------------|-------------------------------------------------|
-| v0.1.0   | 1–4    | MVP                  | Core runtime, ADB/Termux/Mock bridges, web permission UI, 5 tools |
-| v0.2.0   | 5–8    | Hardening            | Persistent ADB connection, remote blob store, OpenAPI freeze, accessibility service bridge (non-root input injection) |
-| v0.3.0   | 9–12   | Scale                | Multi-replica runtime, Redis-backed rate limiter, emulator bridge |
-| v0.4.0   | 13–16  | Enterprise           | SSO, audit log streaming, SLO dashboards         |
-| v1.0.0   | 17–18  | GA                   | 32 MCP tools, 99.9% SLO, STRIDE-complete         |
+| v0.1.0   | 1–4    | MVP                  | Core runtime, ADB/Termux/Mock bridges, web permission UI, 13 tools (shipped) |
+| v0.2.0   | 5–8    | Semantic UI          | ui.dump, ui.find_elements, ui.tap_element, ui.wait_for + 4 more tools (shipped) |
+| v0.3.0   | 9–12   | Memory + Self-Healing | ConfidenceTracker, MemoryStore, SelfHealingSelector (shipped) |
+| v0.3.5   | 13–14  | Rust extension #1    | uiautomator parser (2.8x faster) (shipped) |
+| v0.3.6   | 15     | Rust extension #2    | WorldState diff engine (11x faster hash) (shipped) |
+| v0.4.0   | 16–18  | Accessibility Service| Domain plugins, on-device event hook, more tools (planned) |
+| v0.5.0   | 19–22  | Hardening            | Persistent ADB connection, remote blob store, OpenAPI freeze |
+| v1.0.0   | 23–24  | GA                   | 32 MCP tools, 99.9% SLO, STRIDE-complete         |
 
 ## Contributing
 
-v0.1.0 is founder-led. PRs welcome once we hit v0.2.0.
+v0.3.6 is founder-led. PRs welcome once we hit v0.5.0.
 
 ## License
 

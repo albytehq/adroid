@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import subprocess
 from typing import Any
+from uuid import uuid4
 
 from adroid.bridge.base import BlobStore
 from adroid.contract.errors import BridgeError, DeviceNotAvailableError
@@ -157,12 +158,26 @@ class TermuxBridge:
         self._run(["input", "tap", str(x), str(y)])
 
     def input_text(self, device_id: DeviceId, text: str) -> None:
+        import shlex
         self._require_match(device_id)
+        if any(c in text for c in ("\n", "\r", "\t")):
+            raise BridgeError(
+                "input_text does not support newlines or tabs",
+                code="adroid.bridge.input_text_unsupported",
+                details={"text_length": len(text)},
+            )
         escaped = text.replace(" ", "%s")
-        self._run(["input", "text", escaped])
+        self._run(["input", "text", shlex.quote(escaped)])
 
     def press_key(self, device_id: DeviceId, keycode: str) -> None:
+        import re
         self._require_match(device_id)
+        if not re.fullmatch(r"KEYCODE_[A-Z][A-Z0-9_]*", keycode):
+            raise BridgeError(
+                f"invalid keycode: {keycode!r}",
+                code="adroid.bridge.invalid_keycode",
+                details={"keycode": keycode},
+            )
         self._run(["input", "keyevent", keycode])
 
     def tap_text(
@@ -187,7 +202,7 @@ class TermuxBridge:
         max_scroll_attempts = 5 if scroll_to_visible else 1
 
         while attempts < max_scroll_attempts:
-            dump_path = "/sdcard/adroid-ui-dump.xml"
+            dump_path = f"/sdcard/adroid-ui-dump-{uuid4().hex[:8]}.xml"
             self._run(["uiautomator", "dump", dump_path])
             # Read the file directly (Termux can access /sdcard with permission)
             try:

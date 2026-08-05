@@ -413,6 +413,8 @@ def web_setup():
             model="MockPhone",
         )
     )
+    # Delete stale audit log so signature verification works on fresh chain.
+    Path("/tmp/adroid-test-ui.auditlog").unlink(missing_ok=True)
     runtime = AdroidRuntime(
         issuer_id="adroid-test",
         bridge=bridge,
@@ -435,6 +437,8 @@ def web_setup():
         browser_session_id="test-browser",
     )
     client = TestClient(app)
+    # Hit /ui first to set the browser-session cookie for /api/* auth.
+    client.get("/ui")
 
     # Pair a session
     res = client.post("/agent/session/request", json={

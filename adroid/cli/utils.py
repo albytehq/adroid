@@ -54,7 +54,9 @@ except (OSError, ValueError):
     _term_width = 80
 _console_width = min(_term_width, _MAX_WIDTH)
 
-console = Console(width=_console_width)
+# console writes to stderr — stdout is reserved for machine-readable output
+# (JSON, raw tokens) so `adroid token issue ... | jq` works cleanly.
+console = Console(stderr=True, width=_console_width)
 err_console = Console(stderr=True, style="bold red", width=_console_width)
 
 # Quiet mode flag — set by --quiet flag on commands

@@ -135,23 +135,41 @@ class AuditWriter:
     # ------------------------------------------------------------------
 
     def _recover_state(self) -> tuple[int, str | None]:
-        """Read the last valid (sequence, hash) from the existing log file."""
+        """Read the last valid (sequence, hash) and truncate any corrupt tail.
+
+        If the file ends with a truncated line (mid-write crash), we MUST
+        truncate the file to the last valid byte offset before the next write.
+        Otherwise the corrupt line stays forever and breaks verify_all().
+        """
         last_seq = -1
         last_hash: str | None = None
-        with open(self._path, "rb") as f:
+        good_offset = 0
+        # Open rb+ so we can truncate if needed.
+        with open(self._path, "rb+") as f:
+            offset = 0
             for raw in f:
-                line = raw.decode("utf-8").strip()
+                start = offset
+                offset += len(raw)
+                line = raw.decode("utf-8", errors="strict").strip()
                 if not line:
+                    good_offset = offset
                     continue
                 try:
                     rec = json.loads(line)
+                    if not isinstance(rec, dict):
+                        break
                     last_seq = int(rec["sequence"])
                     last_hash = rec["event_hash"]
-                except (json.JSONDecodeError, KeyError, ValueError):
-                    # Truncated line — likely a crash mid-write. Stop here;
-                    # subsequent writes will overwrite from this point.
-                    #
+                    good_offset = offset
+                except (json.JSONDecodeError, KeyError, ValueError, TypeError, UnicodeDecodeError):
+                    # Truncated line — likely a crash mid-write.
+                    # Truncate the file to good_offset so subsequent appends
+                    # don't leave the corrupt line in place.
                     break
+            if good_offset < offset:
+                f.truncate(good_offset)
+                f.flush()
+                os.fsync(f.fileno())
         return (last_seq + 1, last_hash)
 
 
@@ -177,11 +195,18 @@ class AuditReader:
         prev_hash: str | None = None
         with open(self._path, "rb") as f:
             for raw in f:
-                line = raw.decode("utf-8").strip()
+                try:
+                    line = raw.decode("utf-8").strip()
+                except UnicodeDecodeError as exc:
+                    yield (-1, False, f"decode failed: {exc}")
+                    continue
                 if not line:
                     continue
                 try:
                     rec = json.loads(line)
+                    if not isinstance(rec, dict):
+                        yield (-1, False, f"line parse failed: top-level is {type(rec).__name__}")
+                        continue
                     seq = int(rec["sequence"])
                     payload_dict: dict[str, Any] = rec["payload"]
                     event = AuditEvent.model_validate(payload_dict)
@@ -205,29 +230,62 @@ class AuditReader:
                         payload=canonical_event_payload(event),
                     )
                     try:
+                        sig = rec["signature"]
+                        if not isinstance(sig, str):
+                            raise ValueError(f"signature is {type(sig).__name__}, expected str")
                         self._public_key.verify(
-                            bytes.fromhex(rec["signature"]),
+                            bytes.fromhex(sig),
                             message,
                         )
-                    except (InvalidSignature, ValueError) as exc:
+                    except (InvalidSignature, ValueError, TypeError) as exc:
                         yield (seq, False, f"signature verification failed: {exc}")
                         continue
 
                     yield (seq, True, None)
                     prev_hash = event.event_hash
-                except (json.JSONDecodeError, KeyError, ValueError, ValidationError) as exc:
+                except (json.JSONDecodeError, KeyError, ValueError, TypeError, AttributeError, ValidationError) as exc:
                     yield (-1, False, f"line parse failed: {exc}")
 
     def tail(self, n: int = 10) -> list[AuditEvent]:
-        """Return the last ``n`` verified events. Skips invalid lines."""
-        events: list[AuditEvent] = []
-        # Simpler: just read raw, parse, return last n
+        """Return the last ``n`` cryptographically verified events.
+
+        Walks the hash chain + verifies Ed25519 signatures, returning only
+        events that pass all checks. Skips truncated/tampered lines silently.
+        """
+        verified: list[AuditEvent] = []
+        prev_hash: str | None = None
+        if not self._path.exists():
+            return verified
         with open(self._path, "rb") as f:
-            lines = [l for l in f.read().decode("utf-8").splitlines() if l.strip()]
-        for line in lines[-n:]:
-            try:
-                rec = json.loads(line)
-                events.append(AuditEvent.model_validate(rec["payload"]))
-            except Exception:
-                continue
-        return events
+            for raw in f:
+                try:
+                    line = raw.decode("utf-8").strip()
+                except UnicodeDecodeError:
+                    continue
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                    if not isinstance(rec, dict):
+                        continue
+                    event = AuditEvent.model_validate(rec["payload"])
+                    if event.prev_hash != prev_hash:
+                        continue
+                    if event.event_hash != compute_event_hash(event):
+                        continue
+                    message = compute_signature_message(
+                        prev_hash=prev_hash,
+                        event_hash=event.event_hash or "",
+                        payload=canonical_event_payload(event),
+                    )
+                    sig = rec.get("signature")
+                    if not isinstance(sig, str):
+                        continue
+                    self._public_key.verify(bytes.fromhex(sig), message)
+                    verified.append(event)
+                    prev_hash = event.event_hash
+                    if len(verified) > n:
+                        verified.pop(0)
+                except Exception:
+                    continue
+        return verified

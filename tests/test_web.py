@@ -19,6 +19,10 @@ from adroid.web.server import create_app
 
 @pytest.fixture
 def setup():
+    # Delete any stale audit log so signature verification works on fresh chain.
+    audit_path = Path("/tmp/adroid-test-web2.auditlog")
+    if audit_path.exists():
+        audit_path.unlink()
     blob_store = InMemoryBlobStore()
     bridge = MockBridge(blob_store=blob_store)
     bridge.add_device(
@@ -57,6 +61,9 @@ def setup():
         browser_session_id="test-browser",
     )
     client = TestClient(app)
+    # Hit /ui once so the browser-session cookie is set; subsequent
+    # /api/* calls in tests inherit it via TestClient's cookie jar.
+    client.get("/ui")
     return client, runtime, session_manager, bootstrap_token
 
 
@@ -421,3 +428,70 @@ def test_terminal_stream_records_pairing(setup):
     # Terminal should have pairing-related lines
     pairing_lines = [l for l in state["terminal"] if l["kind"] == "pairing"]
     assert len(pairing_lines) >= 2  # requested + approved
+
+
+# ---------------------------------------------------------------------------
+# v0.3.7: Dashboard /api/* authentication
+# ---------------------------------------------------------------------------
+
+
+def test_api_state_rejects_request_without_cookie(setup):
+    """A bare /api/state call without first hitting /ui should 401."""
+    client, *_ = setup
+    # Use a fresh client that has no cookie jar.
+    from fastapi.testclient import TestClient
+    fresh_client = TestClient(setup[0].app)
+    res = fresh_client.get("/api/state")
+    assert res.status_code == 401
+    assert "browser session required" in res.json()["detail"]
+
+
+def test_api_pair_approve_rejects_request_without_cookie(setup):
+    """A direct POST to /api/pair/{id}/approve without cookie should 401."""
+    client, *_ = setup
+    from fastapi.testclient import TestClient
+    fresh_client = TestClient(setup[0].app)
+    res = fresh_client.post(
+        "/api/pair/any-id/approve",
+        json={"ttl_seconds": 3600},
+    )
+    assert res.status_code == 401
+
+
+def test_api_audit_rejects_request_without_cookie(setup):
+    """A direct GET /api/audit without cookie should 401."""
+    client, *_ = setup
+    from fastapi.testclient import TestClient
+    fresh_client = TestClient(setup[0].app)
+    res = fresh_client.get("/api/audit")
+    assert res.status_code == 401
+
+
+def test_blob_raw_rejects_request_without_cookie(setup):
+    """A direct GET /blob/{ref}/raw without cookie should 401."""
+    client, *_ = setup
+    from fastapi.testclient import TestClient
+    fresh_client = TestClient(setup[0].app)
+    res = fresh_client.get("/blob/abc/raw")
+    assert res.status_code == 401
+
+
+def test_agent_endpoints_do_not_require_cookie(setup):
+    """/agent/* endpoints use capability tokens, not browser cookies.
+
+    A fresh client (no cookie) should still be able to call
+    /agent/session/request and /agent/call as long as it has a valid token.
+    """
+    client, runtime, sm, bootstrap = setup
+    from fastapi.testclient import TestClient
+    fresh_client = TestClient(setup[0].app)
+    # Bootstrap token request should work without cookie.
+    res = fresh_client.post(
+        "/agent/session/request",
+        json={
+            "bootstrap_token": bootstrap.model_dump(mode="json"),
+            "agent_id": "agent:no-cookie",
+        },
+    )
+    assert res.status_code == 200
+    assert "pairing_id" in res.json()

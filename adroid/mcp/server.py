@@ -168,6 +168,92 @@ async def _serve(runtime: AdroidRuntime, token: CapabilityToken) -> None:
                 )
                 return [TextContent(type="text", text='{"launched": true}')]
 
+            if name == "input.tap":
+                did = DeviceId.model_validate(arguments["device_id"])
+                runtime.tap(token=token, device_id=did, x=int(arguments["x"]), y=int(arguments["y"]))
+                return [TextContent(type="text", text='{"tapped": true}')]
+
+            if name == "input.tap_text":
+                did = DeviceId.model_validate(arguments["device_id"])
+                result = runtime.tap_text(
+                    token=token, device_id=did, text=arguments["text"],
+                    match=arguments.get("match", "first"),
+                    scroll_to_visible=arguments.get("scroll_to_visible", True),
+                )
+                return [TextContent(type="text", text=json.dumps(result, default=str))]
+
+            if name == "input.swipe":
+                did = DeviceId.model_validate(arguments["device_id"])
+                runtime.swipe(
+                    token=token, device_id=did,
+                    x1=int(arguments["x1"]), y1=int(arguments["y1"]),
+                    x2=int(arguments["x2"]), y2=int(arguments["y2"]),
+                    duration_ms=int(arguments.get("duration_ms", 300)),
+                )
+                return [TextContent(type="text", text='{"swiped": true}')]
+
+            if name == "input.text":
+                did = DeviceId.model_validate(arguments["device_id"])
+                runtime.input_text(token=token, device_id=did, text=arguments["text"])
+                return [TextContent(type="text", text='{"entered": true}')]
+
+            if name == "input.key":
+                did = DeviceId.model_validate(arguments["device_id"])
+                runtime.press_key(token=token, device_id=did, keycode=arguments["keycode"])
+                return [TextContent(type="text", text='{"pressed": true}')]
+
+            if name == "shell.exec":
+                did = DeviceId.model_validate(arguments["device_id"])
+                result = runtime.run_shell(
+                    token=token, device_id=did, command=arguments["command"],
+                    timeout=arguments.get("timeout"),
+                )
+                return [TextContent(type="text", text=json.dumps(result, default=str))]
+
+            if name == "logs.read":
+                did = DeviceId.model_validate(arguments["device_id"])
+                result = runtime.read_logs(
+                    token=token, device_id=did,
+                    filter_=arguments.get("filter"),
+                    limit=int(arguments.get("limit", 100)),
+                )
+                return [TextContent(type="text", text=json.dumps(result, default=str))]
+
+            if name == "permission.request":
+                did = DeviceId.model_validate(arguments["device_id"])
+                result = runtime.request_permission(
+                    token=token, device_id=did,
+                    scope=arguments["scope"],
+                    reason=arguments.get("reason", ""),
+                )
+                return [TextContent(type="text", text=json.dumps(result, default=str))]
+
+            if name == "ui.dump":
+                did = DeviceId.model_validate(arguments["device_id"])
+                result = runtime.ui_dump(token=token, device_id=did)
+                return [TextContent(type="text", text=json.dumps(result, default=str))]
+
+            if name == "ui.find_elements":
+                did = DeviceId.model_validate(arguments["device_id"])
+                result = runtime.ui_find_elements(
+                    token=token, device_id=did, selector=arguments["selector"],
+                )
+                return [TextContent(type="text", text=json.dumps(result, default=str))]
+
+            if name == "ui.tap_element":
+                did = DeviceId.model_validate(arguments["device_id"])
+                result = runtime.ui_tap_element(
+                    token=token, device_id=did, selector=arguments["selector"],
+                )
+                return [TextContent(type="text", text=json.dumps(result, default=str))]
+
+            if name == "ui.wait_for":
+                did = DeviceId.model_validate(arguments["device_id"])
+                result = runtime.ui_wait_for(
+                    token=token, device_id=did, condition=arguments["condition"],
+                )
+                return [TextContent(type="text", text=json.dumps(result, default=str))]
+
             return [
                 TextContent(
                     type="text",

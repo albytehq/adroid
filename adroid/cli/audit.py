@@ -8,7 +8,7 @@ from typing import Optional
 import typer
 from rich.table import Table
 
-from adroid.cli.utils import console, die, header, info, success, warn
+from adroid.cli.utils import console, die, header, info, print_stdout, success, warn
 
 app = typer.Typer(
     name="audit",
@@ -46,14 +46,16 @@ def show_cmd(
                 continue
 
     if not events:
-        info("Audit log is empty.")
+        if json_output:
+            print_stdout([])
+        else:
+            info("Audit log is empty.")
         return
 
     events = events[-limit:]
 
     if json_output:
-        import json as _json
-        console.print(_json.dumps(events, indent=2, default=str))
+        print_stdout(events)
         return
 
     header(f"Audit Log — Last {len(events)} Events", f"File: {audit_log}")

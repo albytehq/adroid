@@ -14,6 +14,10 @@ from adroid.runtime.core import (
     LOGS_READ_SPEC,
     PERMISSION_REQUEST_SPEC,
     SHELL_EXEC_SPEC,
+    UI_DUMP_SPEC,
+    UI_FIND_ELEMENTS_SPEC,
+    UI_TAP_ELEMENT_SPEC,
+    UI_WAIT_FOR_SPEC,
     AdroidRuntime,
     build_runtime,
 )
@@ -32,6 +36,10 @@ __all__ = [
     "LOGS_READ_SPEC",
     "PERMISSION_REQUEST_SPEC",
     "SHELL_EXEC_SPEC",
+    "UI_DUMP_SPEC",
+    "UI_FIND_ELEMENTS_SPEC",
+    "UI_TAP_ELEMENT_SPEC",
+    "UI_WAIT_FOR_SPEC",
     "AdroidRuntime",
     "build_runtime",
 ]

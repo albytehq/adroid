@@ -47,14 +47,24 @@ from pydantic import BaseModel, Field
 def default_memory_dir() -> Path:
     """Return the default memory storage directory.
 
-    Uses XDG_DATA_HOME on Linux, ~/Library on macOS, %APPDATA% on Windows.
-    Falls back to ~/.adroid/memory/ if none of those exist.
+    Cross-platform:
+        - Linux: $XDG_DATA_HOME/adroid/memory or ~/.adroid/memory
+        - macOS: ~/Library/Application Support/adroid/memory
+        - Windows: %APPDATA%/adroid/memory
+    Falls back to ~/.adroid/memory/ if HOME is also unset (rare).
     """
     if xdg := os.environ.get("XDG_DATA_HOME"):
         return Path(xdg) / "adroid" / "memory"
+    if appdata := os.environ.get("APPDATA"):  # Windows
+        return Path(appdata) / "adroid" / "memory"
     if home := os.environ.get("HOME"):
+        # macOS: prefer ~/Library/Application Support if it exists; else ~/.adroid
+        library = Path(home) / "Library" / "Application Support"
+        if library.exists():
+            return library / "adroid" / "memory"
         return Path(home) / ".adroid" / "memory"
-    return Path.cwd() / ".adroid" / "memory"
+    # Last resort: home() expansion, never CWD (which is non-deterministic).
+    return Path.home() / ".adroid" / "memory"
 
 
 # ---------------------------------------------------------------------------
@@ -211,40 +221,71 @@ class MemoryStore:
         }
 
     def stats(self) -> dict[str, int]:
-        """Return count of entries per store."""
-        return {
-            "device": len(self._device),
-            "skill": len(self._skill),
-            "failure": len(self._failure),
-            "total": len(self._device) + len(self._skill) + len(self._failure),
-        }
+        """Return count of entries per store (thread-safe consistent snapshot)."""
+        with self._lock:
+            d = len(self._device)
+            s = len(self._skill)
+            f = len(self._failure)
+        return {"device": d, "skill": s, "failure": f, "total": d + s + f}
 
     # ------------------------------------------------------------------
     # File I/O
     # ------------------------------------------------------------------
 
     def _load(self, filename: str) -> dict[str, MemoryEntry]:
-        """Load a memory file. Returns empty dict if not found or corrupt."""
+        """Load a memory file. Returns empty dict if not found or corrupt.
+
+        Per-entry isolation: a single corrupt entry drops just that entry,
+        not the entire store. This is critical because _save() overwrites
+        the file — dropping all entries on one bad row would silently
+        destroy the entire memory store.
+        """
         path = self._dir / filename
-        if not path.exists():
+        try:
+            text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return {}
+        except OSError:
             return {}
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return {k: MemoryEntry(**v) for k, v in data.items()}
-        except (json.JSONDecodeError, TypeError, ValueError):
-            # Corrupt file — start fresh. Don't crash the runtime.
+            data = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
             return {}
+        if not isinstance(data, dict):
+            return {}
+        result: dict[str, MemoryEntry] = {}
+        for k, v in data.items():
+            try:
+                if isinstance(v, dict):
+                    result[k] = MemoryEntry(**v)
+            except Exception:
+                # Skip single corrupt entry, preserve the rest.
+                continue
+        return result
 
     def _save(self, filename: str, data: dict[str, MemoryEntry]) -> None:
-        """Save a memory file atomically with fsync."""
+        """Save a memory file atomically with fsync + unique tmp name."""
+        import tempfile
         path = self._dir / filename
-        tmp = path.with_suffix(f".{os.getpid()}.tmp")
         serializable = {k: v.model_dump(mode="json") for k, v in data.items()}
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(json.dumps(serializable, indent=2, default=str))
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)  # atomic on POSIX
+        # mkstemp guarantees a unique tmp path, surviving concurrent
+        # writes from other threads/processes in the same PID.
+        fd, tmp_str = tempfile.mkstemp(
+            dir=str(self._dir), prefix=f".{filename}.", suffix=".tmp"
+        )
+        tmp = Path(tmp_str)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(serializable, indent=2, default=str, sort_keys=True))
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)  # atomic on POSIX
+        except OSError:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
 
 
 # ---------------------------------------------------------------------------

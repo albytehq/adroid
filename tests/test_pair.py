@@ -121,7 +121,9 @@ def test_list_devices_handles_blank_lines():
 def test_print_devices_empty(capsys):
     _print_devices_table([])
     captured = capsys.readouterr()
-    assert "No devices" in captured.out
+    # Human-readable panels now go to stderr (utils.console stderr=True).
+    # Accept the message on either stream so the test is robust to that.
+    assert "No devices" in (captured.out + captured.err)
 
 
 def test_print_devices_with_items(capsys):
@@ -131,5 +133,7 @@ def test_print_devices_with_items(capsys):
     ]
     _print_devices_table(devices)
     captured = capsys.readouterr()
-    assert "R5CR30X" in captured.out
-    assert "192.168.1.42:5555" in captured.out
+    # Rich table renders to stderr (utils.console stderr=True).
+    combined = captured.out + captured.err
+    assert "R5CR30X" in combined
+    assert "192.168.1.42:5555" in combined

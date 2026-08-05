@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ValidationError
@@ -112,13 +112,18 @@ class ApprovePairingRequest(BaseModel):
 
 
 class TerminalStream:
-    """Thread-safe ring buffer of agent activity lines."""
+    """Thread-safe ring buffer of agent activity lines.
+
+    Subscribers are (queue, event_loop) tuples — append() uses
+    loop.call_soon_threadsafe() so it is safe to call from any thread
+    (the agent_call + _dispatch_tool paths run in FastAPI's threadpool).
+    """
 
     def __init__(self, capacity: int = 500) -> None:
         self._lines: list[dict[str, Any]] = []
         self._capacity = capacity
         self._lock = threading.Lock()
-        self._subscribers: list[asyncio.Queue] = []
+        self._subscribers: list[tuple[asyncio.Queue, asyncio.AbstractEventLoop]] = []
 
     def append(self, *, kind: str, text: str, **extra) -> None:
         line = {
@@ -131,10 +136,13 @@ class TerminalStream:
             self._lines.append(line)
             if len(self._lines) > self._capacity:
                 self._lines = self._lines[-self._capacity:]
-        for q in list(self._subscribers):
+            subs = list(self._subscribers)
+        # Publish outside the lock — call_soon_threadsafe is non-blocking.
+        for q, loop in subs:
             try:
-                q.put_nowait(line)
-            except asyncio.QueueFull:
+                loop.call_soon_threadsafe(q.put_nowait, line)
+            except (asyncio.QueueFull, RuntimeError):
+                # Queue full or loop closed — drop silently.
                 pass
 
     def history(self, limit: int = 100) -> list[dict[str, Any]]:
@@ -143,12 +151,14 @@ class TerminalStream:
 
     async def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=100)
-        self._subscribers.append(q)
+        loop = asyncio.get_running_loop()
+        with self._lock:
+            self._subscribers.append((q, loop))
         return q
 
     def unsubscribe(self, q: asyncio.Queue) -> None:
-        if q in self._subscribers:
-            self._subscribers.remove(q)
+        with self._lock:
+            self._subscribers = [(qq, l) for (qq, l) in self._subscribers if qq is not q]
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +242,13 @@ def _dispatch_tool(
         capability=capability.value,
         scope=required_scope.value,
     )
+
+    # Validate args against the tool's JSON schema BEFORE dispatch. Catches
+    # type mismatches, missing required fields, out-of-range values early
+    # with a structured ContractError instead of an opaque bridge failure.
+    spec = state.runtime.get_tool(tool)
+    if spec is not None:
+        state.runtime.validate_args(spec, args)
 
     # Note: gate.authorize is called inside each runtime method (e.g.
     # runtime.list_devices, runtime.ui_tap_element). We do NOT call it
@@ -462,13 +479,33 @@ def create_app(
 
     templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
+    # Browser-session auth: dashboard endpoints (/api/*) require a cookie
+    # matching state.browser_session_id. /agent/* endpoints use capability
+    # tokens instead, so they're excluded from this check.
+    BROWSER_SESSION_COOKIE = "adroid_browser_session"
+
+    def _verify_browser_session(request: Request) -> None:
+        """FastAPI dependency: reject /api/* calls without the browser cookie.
+
+        This is defense-in-depth on top of the 127.0.0.1 default bind.
+        It prevents anyone on the LAN (when --host 0.0.0.0 is explicitly
+        used) from approving pairings or disconnecting sessions without
+        first loading /ui in a browser that holds the cookie.
+        """
+        cookie_val = request.cookies.get(BROWSER_SESSION_COOKIE)
+        if not cookie_val or not secrets.compare_digest(cookie_val, state.browser_session_id):
+            raise HTTPException(
+                status_code=401,
+                detail="browser session required — load /ui first",
+            )
+
     # ------------------------------------------------------------------
     # Browser UI
     # ------------------------------------------------------------------
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
-        return templates.TemplateResponse(
+        response = templates.TemplateResponse(
             request=request,
             name="dashboard.html",
             context={
@@ -476,13 +513,24 @@ def create_app(
                 "session_id": state.browser_session_id,
             },
         )
+        # Set the browser-session cookie so subsequent /api/* calls pass auth.
+        # HttpOnly + SameSite=strict — JS can't read it, browser won't send
+        # it cross-site. Path=/ so it covers every endpoint.
+        response.set_cookie(
+            key=BROWSER_SESSION_COOKIE,
+            value=state.browser_session_id,
+            httponly=True,
+            samesite="strict",
+            path="/",
+        )
+        return response
 
     @app.get("/ui", response_class=HTMLResponse)
     async def ui_alias(request: Request):
         return await index(request)
 
     @app.get("/api/state")
-    async def api_state():
+    async def api_state(_: None = Depends(_verify_browser_session)):
         """Single endpoint the dashboard polls for everything."""
         return {
             "pairings": [p.to_dict() for p in session_manager.list_pending_pairings()],
@@ -493,17 +541,17 @@ def create_app(
         }
 
     @app.get("/api/audit")
-    async def api_audit(limit: int = 50):
+    async def api_audit(limit: int = 50, _: None = Depends(_verify_browser_session)):
         reader = runtime.audit_reader()
         events = reader.tail(n=limit)
         return [e.model_dump(mode="json") for e in events]
 
     @app.get("/api/tools")
-    async def api_tools():
+    async def api_tools(_: None = Depends(_verify_browser_session)):
         return [t.model_dump(mode="json") for t in runtime.list_tools()]
 
     @app.post("/api/pair/{pairing_id}/approve")
-    async def api_approve_pairing(pairing_id: str, req: ApprovePairingRequest):
+    async def api_approve_pairing(pairing_id: str, req: ApprovePairingRequest, _: None = Depends(_verify_browser_session)):
         try:
             p = session_manager.approve_pairing(
                 pairing_id=pairing_id,
@@ -520,7 +568,7 @@ def create_app(
         return {"ok": True, "pairing": p.to_dict()}
 
     @app.post("/api/pair/{pairing_id}/deny")
-    async def api_deny_pairing(pairing_id: str):
+    async def api_deny_pairing(pairing_id: str, _: None = Depends(_verify_browser_session)):
         try:
             p = session_manager.deny_pairing(
                 pairing_id=pairing_id,
@@ -536,7 +584,7 @@ def create_app(
         return {"ok": True, "pairing": p.to_dict()}
 
     @app.post("/api/session/{session_id}/disconnect")
-    async def api_disconnect_session(session_id: str):
+    async def api_disconnect_session(session_id: str, _: None = Depends(_verify_browser_session)):
         ok = session_manager.disconnect_session(session_id)
         if not ok:
             raise HTTPException(status_code=404, detail="session not found or already revoked")
@@ -547,7 +595,7 @@ def create_app(
         return {"ok": True}
 
     @app.get("/blob/{blob_ref}/raw")
-    async def api_blob_raw(blob_ref: str):
+    async def api_blob_raw(blob_ref: str, _: None = Depends(_verify_browser_session)):
         data = runtime.get_blob(blob_ref)
         if data is None:
             raise HTTPException(status_code=404, detail="blob not found")
@@ -736,7 +784,9 @@ def run_server(
     session_manager: SessionManager,
     issuer: TokenIssuer,
     bootstrap_token: CapabilityToken,
-    host: str = "0.0.0.0",
+    # Default to loopback for security. Pass --host 0.0.0.0 explicitly when
+    # exposing to LAN (and pair with a reverse proxy + auth in front).
+    host: str = "127.0.0.1",
     port: int = 7654,
     browser_session_id: str | None = None,
 ) -> None:

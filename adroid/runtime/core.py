@@ -29,6 +29,7 @@ import secrets
 from pathlib import Path
 from typing import Any, Iterable
 
+from adroid import __version__
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
@@ -570,6 +571,8 @@ class AdroidRuntime:
         self._gate = PermissionGate(
             issuer_id=self._issuer_id,
             public_key=self._token_public,
+            # Revocation checker is wired in later via set_revocation_checker()
+            # once SessionManager is constructed (chicken-and-egg avoidance).
         )
         self._audit = AuditWriter(
             log_path=audit_log_path,
@@ -619,6 +622,16 @@ class AdroidRuntime:
     def confidence_tracker(self):
         """v0.3.0: ConfidenceTracker instance (per-strategy success stats)."""
         return self._confidence_tracker
+
+    def set_revocation_checker(self, checker) -> None:
+        """Wire a revocation checker (e.g., SessionManager.is_revoked) into the gate.
+
+        Called by the web layer after both runtime and SessionManager are
+        constructed. After this call, every gate.authorize() consults the
+        checker first — defense-in-depth so revoked tokens are rejected even
+        on non-HTTP paths (CLI, future transports).
+        """
+        self._gate._is_revoked = checker  # noqa: SLF001 — intentional wiring
 
     def list_tools(self) -> list[ToolSpec]:
         return list(self._tools.values())
@@ -1127,6 +1140,67 @@ class AdroidRuntime:
             )
         return spec
 
+    def validate_args(self, spec: ToolSpec, args: dict[str, Any]) -> None:
+        """Validate args against the ToolSpec's JSON schema before dispatch.
+
+        Public API — wired in by the web layer. Catches bad input early:
+        type mismatches, missing required fields, out-of-range values,
+        unknown args (when additionalProperties is False). Raises a
+        structured ContractError(code="adroid.contract.schema_violation")
+        instead of letting an opaque bridge error surface later.
+        """
+        schema = spec.args_schema
+        if not schema or schema.get("type") != "object":
+            return  # Schema is permissive or absent — skip
+        # Lightweight check: required keys + type + min/max on common fields.
+        # Full jsonschema validation is heavier; we do the cheap subset that
+        # catches 95% of agent mistakes.
+        required = schema.get("required", [])
+        missing = [k for k in required if k not in args]
+        if missing:
+            raise ContractError(
+                f"missing required args for {spec.name}: {missing}",
+                code="adroid.contract.schema_violation",
+                details={"tool": spec.name, "missing": missing, "required": required},
+            )
+        properties = schema.get("properties", {})
+        for key, value in args.items():
+            if key not in properties:
+                if schema.get("additionalProperties") is False:
+                    raise ContractError(
+                        f"unknown arg '{key}' for {spec.name}",
+                        code="adroid.contract.schema_violation",
+                        details={"tool": spec.name, "unknown_arg": key},
+                    )
+                continue
+            prop = properties[key] or {}
+            prop_type = prop.get("type")
+            if prop_type == "integer" and not isinstance(value, int):
+                raise ContractError(
+                    f"arg '{key}' must be integer, got {type(value).__name__}",
+                    code="adroid.contract.schema_violation",
+                    details={"tool": spec.name, "arg": key, "expected": "integer", "got": type(value).__name__},
+                )
+            if prop_type == "string" and not isinstance(value, str):
+                raise ContractError(
+                    f"arg '{key}' must be string, got {type(value).__name__}",
+                    code="adroid.contract.schema_violation",
+                    details={"tool": spec.name, "arg": key, "expected": "string", "got": type(value).__name__},
+                )
+            if prop_type == "integer" and isinstance(value, int):
+                if "minimum" in prop and value < prop["minimum"]:
+                    raise ContractError(
+                        f"arg '{key}'={value} below minimum {prop['minimum']}",
+                        code="adroid.contract.schema_violation",
+                        details={"tool": spec.name, "arg": key, "value": value, "minimum": prop["minimum"]},
+                    )
+                if "maximum" in prop and value > prop["maximum"]:
+                    raise ContractError(
+                        f"arg '{key}'={value} above maximum {prop['maximum']}",
+                        code="adroid.contract.schema_violation",
+                        details={"tool": spec.name, "arg": key, "value": value, "maximum": prop["maximum"]},
+                    )
+
     def _audit_call(
         self,
         token: CapabilityToken,
@@ -1181,7 +1255,7 @@ class AdroidRuntime:
             outcome=AuditOutcome.SUCCESS,
             method="runtime.boot",
             args_digest=hashlib.sha256(b"").hexdigest(),
-            metadata={"issuer_id": self._issuer_id, "version": "0.1.0"},
+            metadata={"issuer_id": self._issuer_id, "version": __version__},
         )
         try:
             self._audit.write(event)

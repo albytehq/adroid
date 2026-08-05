@@ -560,6 +560,8 @@ class TestWebAPIStress:
         app = create_app(runtime=runtime, session_manager=sm, issuer=issuer,
                          bootstrap_token=bt, browser_session_id="b")
         client = TestClient(app)
+        # Hit /ui first to set the browser-session cookie for /api/* auth.
+        client.get("/ui")
         res = client.post("/agent/session/request", json={
             "bootstrap_token": bt.model_dump(mode="json"), "agent_id": "stress"})
         pid = res.json()["pairing_id"]

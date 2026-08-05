@@ -46,7 +46,7 @@ def start_cmd(
         help="Device bridge: mock (no device), adb (USB/WiFi), or termux (on phone)",
     ),
     port: int = typer.Option(7654, "--port", "-p", help="HTTP port for web UI + agent API"),
-    host: str = typer.Option("0.0.0.0", "--host", help="Bind address"),
+    host: str = typer.Option("127.0.0.1", "--host", help="Bind address (default loopback; use 0.0.0.0 to expose to LAN)"),
     audit_log: Path = typer.Option(
         Path("adroid.auditlog"), "--audit-log", help="Path to audit log file",
     ),
@@ -162,6 +162,9 @@ def start_cmd(
         public_key=runtime._token_public,  # noqa: SLF001
     )
     session_manager = SessionManager(issuer=issuer, max_sessions=max_sessions)
+    # Wire revocation into the gate — defense-in-depth. After this call,
+    # every gate.authorize() checks session_manager.is_revoked first.
+    runtime.set_revocation_checker(session_manager.is_revoked)
     bootstrap_token = issuer.issue(
         subject="bootstrap",
         grants=[],
@@ -188,7 +191,7 @@ def start_cmd(
             "issuer_id": runtime.issuer_id,
             "browser_session": browser_session_id,
             "max_sessions": max_sessions,
-            "bootstrap_token": json.loads(token_json),
+            "bootstrap_token": bootstrap_token.model_dump(mode="json"),
         })
     elif print_token:
         # ONLY token to stdout, everything else to stderr

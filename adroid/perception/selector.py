@@ -215,16 +215,16 @@ class SelfHealingSelector:
                     description=text_value,
                     match=selector.match,
                 )
-            # Try as text_contains (substring match)
+            # Try as text_contains (substring match) — high-confidence fallback
             if selector.text_contains is None:
                 fallbacks[SelectorStrategy.TEXT_CONTAINS] = Selector(
                     text_contains=text_value,
                     match=selector.match,
                 )
-            # Try class_name + text_contains combo
+            # Try class_name + text_contains combo (broadens search)
             fallbacks[SelectorStrategy.CLASS_NAME] = Selector(
                 text_contains=text_value,
-                class_name="android.widget.Button",
+                class_name=selector.class_name or "android.widget.Button",
                 match=selector.match,
             )
 
@@ -233,7 +233,10 @@ class SelfHealingSelector:
             # Split "login_btn" → "login" → try as text_contains
             parts = selector.resource_id.replace("/", " ").replace("_", " ").split()
             meaningful = " ".join(parts) if parts else selector.resource_id
-            if meaningful:
+            # Only set TEXT_CONTAINS from resource_id if not already set by text —
+            # the text-derived form is higher-confidence and the resource_id form
+            # ("login btn") rarely matches real UI strings.
+            if meaningful and SelectorStrategy.TEXT_CONTAINS not in fallbacks:
                 fallbacks[SelectorStrategy.TEXT_CONTAINS] = Selector(
                     text_contains=meaningful,
                     match=selector.match,
